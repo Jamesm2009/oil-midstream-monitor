@@ -1,0 +1,12 @@
+{
+  "name": "oil-supply-chain-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "backfill": "node scripts/backfill.js",
+    "test-apis": "node scripts/test-apis.js"
+  },
+  "dependencies": {
+    "@upstash/redis": "^1.34.3"
+  }
+}

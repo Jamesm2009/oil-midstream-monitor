@@ -1,0 +1,788 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Oil Supply Chain Monitor</title>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;600;700&family=Lora:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #faf7f2;
+  --primary: #1a3356;
+  --accent: #2e6da4;
+  --text: #2c2c2c;
+  --text-muted: #6b6b6b;
+  --border: #d4cfc7;
+  --card-bg: #ffffff;
+  --green: #1a8a4a;
+  --amber: #ca8a04;
+  --red: #c0392b;
+  --font-display: 'Cormorant Garamond', serif;
+  --font-body: 'Lora', serif;
+  --font-data: 'JetBrains Mono', monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: var(--font-body);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.container {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem;
+}
+
+/* Login */
+#login-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+}
+
+.login-box {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  padding: 3rem 2.5rem;
+  max-width: 380px;
+  width: 100%;
+}
+
+.login-box h1 {
+  font-family: var(--font-display);
+  font-size: 1.6rem;
+  font-weight: 600;
+  color: var(--primary);
+  margin-bottom: 0.5rem;
+}
+
+.login-box p {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  margin-bottom: 1.5rem;
+}
+
+.login-box input[type="password"] {
+  width: 100%;
+  padding: 0.7rem 0.8rem;
+  font-family: var(--font-data);
+  font-size: 0.9rem;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  margin-bottom: 1rem;
+  outline: none;
+}
+
+.login-box input[type="password"]:focus {
+  border-color: var(--accent);
+}
+
+.login-box button {
+  width: 100%;
+  padding: 0.7rem;
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  background: var(--primary);
+  color: #fff;
+  border: none;
+  cursor: pointer;
+}
+
+.login-box button:hover { background: var(--accent); }
+
+.login-error {
+  color: var(--red);
+  font-size: 0.8rem;
+  margin-top: 0.5rem;
+  display: none;
+}
+
+/* Dashboard */
+#dashboard { display: none; }
+
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  border-bottom: 2px solid var(--primary);
+  padding-bottom: 1rem;
+  margin-bottom: 2rem;
+}
+
+header h1 {
+  font-family: var(--font-display);
+  font-size: 1.8rem;
+  font-weight: 700;
+  color: var(--primary);
+}
+
+.meta-line {
+  font-family: var(--font-data);
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.section-label {
+  font-family: var(--font-display);
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: var(--primary);
+  margin: 2rem 0 1rem;
+  padding-bottom: 0.3rem;
+  border-bottom: 1px solid var(--border);
+}
+
+/* Node cards */
+.node-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+}
+
+@media (min-width: 700px) {
+  .node-grid { grid-template-columns: 1fr 1fr; }
+}
+
+.node-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  padding: 1.25rem 1.5rem;
+  position: relative;
+}
+
+.node-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.6rem;
+}
+
+.status-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-dot.green { background: var(--green); }
+.status-dot.amber { background: var(--amber); }
+.status-dot.red { background: var(--red); }
+.status-dot.unknown { background: var(--border); }
+
+.node-id {
+  font-family: var(--font-data);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.node-name {
+  font-family: var(--font-display);
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--primary);
+}
+
+.node-summary {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin-bottom: 0.8rem;
+}
+
+.series-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.series-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 0.3rem 0;
+  border-bottom: 1px dotted var(--border);
+}
+
+.series-row:last-child { border-bottom: none; }
+
+.series-label {
+  font-size: 0.78rem;
+  color: var(--text);
+  flex: 1;
+}
+
+.series-value {
+  font-family: var(--font-data);
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--primary);
+  text-align: right;
+  margin-left: 1rem;
+}
+
+.series-meta {
+  font-family: var(--font-data);
+  font-size: 0.62rem;
+  color: var(--text-muted);
+  text-align: right;
+  margin-left: 0.5rem;
+  white-space: nowrap;
+}
+
+.stale-flag {
+  color: var(--amber);
+  font-family: var(--font-data);
+  font-size: 0.6rem;
+  font-weight: 500;
+}
+
+.sparkline-container {
+  margin-top: 0.5rem;
+  height: 40px;
+  position: relative;
+}
+
+.sparkline-container canvas {
+  width: 100%;
+  height: 40px;
+}
+
+/* Manual input */
+.input-section {
+  margin-top: 3rem;
+  padding-top: 2rem;
+  border-top: 2px solid var(--primary);
+}
+
+.input-form {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  padding: 1.5rem;
+}
+
+.input-form h3 {
+  font-family: var(--font-display);
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--primary);
+  margin-bottom: 1rem;
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.8rem;
+  margin-bottom: 0.8rem;
+}
+
+@media (max-width: 500px) {
+  .form-row { grid-template-columns: 1fr; }
+}
+
+.form-group label {
+  display: block;
+  font-size: 0.75rem;
+  font-family: var(--font-data);
+  color: var(--text-muted);
+  margin-bottom: 0.25rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.form-group select,
+.form-group input {
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  font-family: var(--font-data);
+  font-size: 0.82rem;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  outline: none;
+}
+
+.form-group select:focus,
+.form-group input:focus {
+  border-color: var(--accent);
+}
+
+.submit-btn {
+  padding: 0.6rem 1.5rem;
+  font-family: var(--font-body);
+  font-size: 0.85rem;
+  background: var(--primary);
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  margin-top: 0.5rem;
+}
+
+.submit-btn:hover { background: var(--accent); }
+
+.input-result {
+  font-family: var(--font-data);
+  font-size: 0.78rem;
+  margin-top: 0.5rem;
+  padding: 0.4rem 0;
+}
+
+.input-result.success { color: var(--green); }
+.input-result.error { color: var(--red); }
+
+/* Status override */
+.override-section {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.override-form {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.override-form select {
+  padding: 0.5rem;
+  font-family: var(--font-data);
+  font-size: 0.82rem;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+
+/* Footer */
+.footer {
+  margin-top: 3rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+  font-family: var(--font-data);
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  display: flex;
+  justify-content: space-between;
+}
+
+.logout-btn {
+  font-family: var(--font-data);
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.loading { text-align: center; padding: 4rem; color: var(--text-muted); }
+</style>
+</head>
+<body>
+
+<!-- Login Screen -->
+<div id="login-screen">
+  <div class="login-box">
+    <h1>Oil Supply Chain Monitor</h1>
+    <p>Eight-node midstream stress tracker</p>
+    <input type="password" id="password-input" placeholder="Password" autofocus>
+    <button onclick="doLogin()">Enter</button>
+    <div class="login-error" id="login-error">Invalid credentials</div>
+  </div>
+</div>
+
+<!-- Dashboard -->
+<div id="dashboard" class="container">
+  <header>
+    <h1>Oil Supply Chain Monitor</h1>
+    <div class="meta-line" id="last-updated">Loading...</div>
+  </header>
+
+  <div class="section-label">Physical Chain</div>
+  <div class="node-grid" id="physical-nodes"></div>
+
+  <div class="section-label">Permission Chain</div>
+  <div class="node-grid" id="permission-nodes"></div>
+
+  <!-- Manual Input -->
+  <div class="input-section">
+    <div class="input-form">
+      <h3>Manual Data Input</h3>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Node</label>
+          <select id="input-node" onchange="updateSeriesOptions()">
+            <option value="">Select node...</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Series</label>
+          <select id="input-series">
+            <option value="">Select series...</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Value</label>
+          <input type="text" id="input-value" placeholder="e.g. 35 or 3-8">
+        </div>
+        <div class="form-group">
+          <label>Date</label>
+          <input type="date" id="input-date">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Source</label>
+          <input type="text" id="input-source" placeholder="e.g. Windward MIOC">
+        </div>
+        <div class="form-group" style="display:flex;align-items:flex-end;">
+          <button class="submit-btn" onclick="submitManualData()">Submit</button>
+        </div>
+      </div>
+      <div class="input-result" id="input-result"></div>
+
+      <div class="override-section">
+        <h3 style="font-family:var(--font-display);font-size:1rem;font-weight:600;color:var(--primary);margin-bottom:0.8rem;">Status Override</h3>
+        <div class="override-form">
+          <div class="form-group">
+            <label>Node</label>
+            <select id="override-node"></select>
+          </div>
+          <div class="form-group">
+            <label>Status</label>
+            <select id="override-status">
+              <option value="">Clear override</option>
+              <option value="green">Green</option>
+              <option value="amber">Amber</option>
+              <option value="red">Red</option>
+            </select>
+          </div>
+          <button class="submit-btn" onclick="submitOverride()">Set</button>
+        </div>
+        <div class="input-result" id="override-result"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <span id="footer-meta"></span>
+    <button class="logout-btn" onclick="doLogout()">Logout</button>
+  </div>
+</div>
+
+<script>
+// State
+let dashboardData = null;
+
+// Auth
+async function doLogin() {
+  const pw = document.getElementById('password-input').value;
+  const errEl = document.getElementById('login-error');
+  errEl.style.display = 'none';
+
+  try {
+    const res = await fetch('/api/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pw }),
+    });
+    if (res.ok) {
+      document.getElementById('login-screen').style.display = 'none';
+      document.getElementById('dashboard').style.display = 'block';
+      loadDashboard();
+    } else {
+      errEl.style.display = 'block';
+    }
+  } catch (e) {
+    errEl.textContent = 'Connection error';
+    errEl.style.display = 'block';
+  }
+}
+
+async function doLogout() {
+  await fetch('/api/logout', { method: 'POST' });
+  location.reload();
+}
+
+// Enter key on password field
+document.getElementById('password-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') doLogin();
+});
+
+// Load dashboard data
+async function loadDashboard() {
+  try {
+    const res = await fetch('/api/data');
+    if (res.status === 401) {
+      document.getElementById('login-screen').style.display = 'flex';
+      document.getElementById('dashboard').style.display = 'none';
+      return;
+    }
+    dashboardData = await res.json();
+    renderDashboard(dashboardData);
+  } catch (e) {
+    console.error('Load failed:', e);
+  }
+}
+
+// Render
+function renderDashboard(data) {
+  const physicalEl = document.getElementById('physical-nodes');
+  const permissionEl = document.getElementById('permission-nodes');
+  physicalEl.innerHTML = '';
+  permissionEl.innerHTML = '';
+
+  const nodeSelect = document.getElementById('input-node');
+  const overrideSelect = document.getElementById('override-node');
+  nodeSelect.innerHTML = '<option value="">Select node...</option>';
+  overrideSelect.innerHTML = '';
+
+  for (const node of data.nodes) {
+    const card = createNodeCard(node);
+    if (node.category === 'physical') {
+      physicalEl.appendChild(card);
+    } else {
+      permissionEl.appendChild(card);
+    }
+
+    // Populate selects
+    const opt1 = document.createElement('option');
+    opt1.value = node.id;
+    opt1.textContent = `${node.id.toUpperCase()} — ${node.name}`;
+    nodeSelect.appendChild(opt1);
+
+    const opt2 = opt1.cloneNode(true);
+    overrideSelect.appendChild(opt2);
+  }
+
+  // Meta
+  if (data.meta?.lastCron) {
+    const d = new Date(data.meta.lastCron);
+    document.getElementById('last-updated').textContent = `Last cron: ${d.toLocaleDateString()} ${d.toLocaleTimeString()}`;
+    document.getElementById('footer-meta').textContent = `Data refreshes daily at 21:00 UTC`;
+  } else {
+    document.getElementById('last-updated').textContent = 'No cron run yet';
+  }
+
+  // Set today's date as default for manual input
+  document.getElementById('input-date').value = new Date().toISOString().split('T')[0];
+}
+
+function createNodeCard(node) {
+  const card = document.createElement('div');
+  card.className = 'node-card';
+
+  const statusClass = node.status?.current || 'unknown';
+  const overrideNote = node.status?.override
+    ? ` (override — auto: ${node.status.auto})`
+    : '';
+
+  let seriesHTML = '';
+  for (const s of node.series) {
+    const val = s.latest ? formatValue(s.latest.value, s.unit) : '—';
+    const date = s.latest ? s.latest.date : '';
+    const staleHTML = s.stale ? '<span class="stale-flag"> STALE</span>' : '';
+    seriesHTML += `
+      <div class="series-row">
+        <span class="series-label">${s.label}${staleHTML}</span>
+        <span class="series-value">${val}</span>
+        <span class="series-meta">${date}</span>
+      </div>`;
+  }
+
+  card.innerHTML = `
+    <div class="node-header">
+      <div class="status-dot ${statusClass}" title="${statusClass}${overrideNote}"></div>
+      <span class="node-id">${node.id}</span>
+      <span class="node-name">${node.name}</span>
+    </div>
+    <div class="node-summary">${node.summary}</div>
+    <div class="series-list">${seriesHTML}</div>
+    <div class="sparkline-container" id="spark-${node.id}"></div>
+  `;
+
+  // Load sparkline for the first series with data
+  const firstWithData = node.series.find(s => s.historyLength > 1);
+  if (firstWithData) {
+    setTimeout(() => loadSparkline(node.id, firstWithData.key), 100);
+  }
+
+  return card;
+}
+
+function formatValue(value, unit) {
+  if (value === null || value === undefined) return '—';
+  if (typeof value === 'string') return value;
+  if (unit === '%') return value.toFixed(1) + '%';
+  if (unit === '$/bbl') return '$' + value.toFixed(2);
+  if (unit === '$/gal') return '$' + value.toFixed(3);
+  if (unit === 'K bbl' || unit === 'K bbl/d') return (value / 1000).toFixed(1) + 'M';
+  if (unit === 'M bbl') return value.toFixed(1) + 'M';
+  if (unit === '/day') return value.toFixed(0);
+  return value.toLocaleString();
+}
+
+// Sparklines
+async function loadSparkline(nodeId, seriesKey) {
+  try {
+    const res = await fetch(`/api/history?node=${nodeId}&series=${seriesKey}`);
+    if (!res.ok) return;
+    const { data } = await res.json();
+    if (!data || data.length < 2) return;
+
+    const container = document.getElementById(`spark-${nodeId}`);
+    if (!container) return;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = container.offsetWidth * 2;
+    canvas.height = 80;
+    canvas.style.width = '100%';
+    canvas.style.height = '40px';
+    container.appendChild(canvas);
+
+    // Use last 90 points max
+    const points = data.slice(-90).filter(p => typeof p.value === 'number');
+    if (points.length < 2) return;
+
+    const ctx = canvas.getContext('2d');
+    const values = points.map(p => p.value);
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const range = max - min || 1;
+
+    const w = canvas.width;
+    const h = canvas.height;
+    const padding = 4;
+
+    ctx.beginPath();
+    ctx.strokeStyle = '#2e6da4';
+    ctx.lineWidth = 1.5;
+
+    for (let i = 0; i < values.length; i++) {
+      const x = padding + (i / (values.length - 1)) * (w - 2 * padding);
+      const y = h - padding - ((values[i] - min) / range) * (h - 2 * padding);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    // Fill
+    ctx.lineTo(w - padding, h - padding);
+    ctx.lineTo(padding, h - padding);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(46, 109, 164, 0.08)';
+    ctx.fill();
+  } catch (e) {
+    console.error('Sparkline error:', e);
+  }
+}
+
+// Manual input
+function updateSeriesOptions() {
+  const nodeId = document.getElementById('input-node').value;
+  const seriesSelect = document.getElementById('input-series');
+  seriesSelect.innerHTML = '<option value="">Select series...</option>';
+
+  if (!dashboardData || !nodeId) return;
+
+  const node = dashboardData.nodes.find(n => n.id === nodeId);
+  if (!node) return;
+
+  for (const s of node.series) {
+    const opt = document.createElement('option');
+    opt.value = s.key;
+    opt.textContent = `${s.label} (${s.unit})${s.manual ? '' : ' [auto]'}`;
+    seriesSelect.appendChild(opt);
+  }
+}
+
+async function submitManualData() {
+  const resultEl = document.getElementById('input-result');
+  const payload = {
+    node: document.getElementById('input-node').value,
+    series: document.getElementById('input-series').value,
+    value: document.getElementById('input-value').value,
+    date: document.getElementById('input-date').value,
+    source: document.getElementById('input-source').value || 'manual',
+  };
+
+  if (!payload.node || !payload.series || !payload.value || !payload.date) {
+    resultEl.textContent = 'All fields required';
+    resultEl.className = 'input-result error';
+    return;
+  }
+
+  // Try parsing as number if possible
+  const numVal = parseFloat(payload.value);
+  if (!isNaN(numVal) && !payload.value.includes('-')) {
+    payload.value = numVal;
+  }
+
+  try {
+    const res = await fetch('/api/manual-input', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      resultEl.textContent = `Saved: ${data.key} (${data.totalPoints} total points)`;
+      resultEl.className = 'input-result success';
+      // Reload dashboard
+      setTimeout(loadDashboard, 500);
+    } else {
+      resultEl.textContent = data.error || 'Failed';
+      resultEl.className = 'input-result error';
+    }
+  } catch (e) {
+    resultEl.textContent = 'Connection error';
+    resultEl.className = 'input-result error';
+  }
+}
+
+async function submitOverride() {
+  const resultEl = document.getElementById('override-result');
+  const node = document.getElementById('override-node').value;
+  const status = document.getElementById('override-status').value || null;
+
+  try {
+    const res = await fetch('/api/status-override', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ node, status }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      resultEl.textContent = `${node}: ${status || 'override cleared'}`;
+      resultEl.className = 'input-result success';
+      setTimeout(loadDashboard, 500);
+    } else {
+      resultEl.textContent = data.error || 'Failed';
+      resultEl.className = 'input-result error';
+    }
+  } catch (e) {
+    resultEl.textContent = 'Connection error';
+    resultEl.className = 'input-result error';
+  }
+}
+
+// Try auto-login on page load (if cookie exists)
+(async () => {
+  try {
+    const res = await fetch('/api/data');
+    if (res.ok) {
+      document.getElementById('login-screen').style.display = 'none';
+      document.getElementById('dashboard').style.display = 'block';
+      dashboardData = await res.json();
+      renderDashboard(dashboardData);
+    }
+  } catch {}
+})();
+</script>
+</body>
+</html>
