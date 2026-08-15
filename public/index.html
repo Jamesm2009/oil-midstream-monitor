@@ -335,9 +335,17 @@ header h1 {
   border-bottom: none;
 }
 
+.threshold-red {
+  color: var(--red);
+}
+
+.threshold-amber {
+  color: var(--amber);
+}
+
 .sparkline-container {
   margin-top: 0.5rem;
-  height: 40px;
+  min-height: 40px;
   position: relative;
 }
 
@@ -722,15 +730,30 @@ function createNodeCard(node) {
       </div>`;
   }
 
-  // Source info panel
+  // Source and threshold info panel
   let sourcesHTML = '';
-  if (node.manualSources && node.manualSources.length > 0) {
-    const sourceItems = node.manualSources.map(s => `<div class="source-item">${s}</div>`).join('');
-    sourcesHTML = `
-      <div class="source-panel" id="sources-${node.id}" style="display:none;">
-        <div class="source-panel-title">Data Sources</div>
-        ${sourceItems}
-      </div>`;
+  const hasSources = node.manualSources && node.manualSources.length > 0;
+  const hasThresholds = node.thresholdInfo && node.thresholdInfo.length > 0;
+
+  if (hasSources || hasThresholds) {
+    let panelContent = '';
+
+    if (hasThresholds) {
+      const threshItems = node.thresholdInfo.map(s => {
+        let cls = 'source-item';
+        if (s.startsWith('RED:')) cls = 'source-item threshold-red';
+        else if (s.startsWith('AMBER:')) cls = 'source-item threshold-amber';
+        return `<div class="${cls}">${s}</div>`;
+      }).join('');
+      panelContent += `<div class="source-panel-title">Status Scoring</div>${threshItems}`;
+    }
+
+    if (hasSources) {
+      const sourceItems = node.manualSources.map(s => `<div class="source-item">${s}</div>`).join('');
+      panelContent += `<div class="source-panel-title" style="margin-top:0.6rem;">Data Sources</div>${sourceItems}`;
+    }
+
+    sourcesHTML = `<div class="source-panel" id="sources-${node.id}" style="display:none;">${panelContent}</div>`;
   }
 
   card.innerHTML = `
