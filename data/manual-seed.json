@@ -1,8 +1,0 @@
-{
-  "series:n2:hormuz_transits": [
-    { "value": 35, "date": "2026-07-23", "source": "A26 assessment" }
-  ],
-  "series:n7:warrisk_band": [
-    { "value": "3-8", "date": "2026-07-23", "source": "Prandelli/TSCS" }
-  ]
-}
