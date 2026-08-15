@@ -18,6 +18,7 @@ module.exports = async (req, res) => {
         summary: node.summary,
         keyMetric: node.keyMetric,
         manualSources: node.manualSources || [],
+        thresholdInfo: node.thresholdInfo || [],
         series: [],
         status: null,
       };
