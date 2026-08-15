@@ -1,4 +1,3 @@
-//Fix-Sort
 const { requireAuth } = require('../lib/auth');
 const { getRedis } = require('../lib/redis');
 
