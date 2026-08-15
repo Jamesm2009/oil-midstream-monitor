@@ -158,6 +158,107 @@ module.exports = async (req, res) => {
       log.push(`[CALC] crack spreads: ERROR — ${err.message}`);
     }
 
+    // Fetch straits.live status bundle (free, no API key, CC0 licensed)
+    try {
+      const straitsRes = await fetch('https://straits.live/status');
+      if (!straitsRes.ok) throw new Error(`straits.live ${straitsRes.status}`);
+      const sl = await straitsRes.json();
+      const today = sl.asOf ? sl.asOf.split('T')[0] : new Date().toISOString().split('T')[0];
+
+      // N1 — Pipeline bypass utilisation
+      if (sl.pipelineBypass && Array.isArray(sl.pipelineBypass)) {
+        const petroline = sl.pipelineBypass.find(p => p.id === 'petroline');
+        const adcop = sl.pipelineBypass.find(p => p.id === 'adcop');
+        if (petroline) {
+          const added = await appendToHistory(redis, 'series:n1:petroline_pct', [
+            { value: petroline.currentUtilizationPct, date: today, source: 'straits.live' }
+          ]);
+          log.push(`[STRAITS] petroline_pct: ${petroline.currentUtilizationPct}% (${added} new)`);
+        }
+        if (adcop) {
+          const added = await appendToHistory(redis, 'series:n1:adcop_pct', [
+            { value: adcop.currentUtilizationPct, date: today, source: 'straits.live' }
+          ]);
+          log.push(`[STRAITS] adcop_pct: ${adcop.currentUtilizationPct}% (${added} new)`);
+        }
+      }
+
+      // N2 — Chokepoint transits
+      if (sl.transits) {
+        const transitDate = sl.transits.asOfDate || today;
+        const added = await appendToHistory(redis, 'series:n2:hormuz_portwatch', [
+          { value: sl.transits.count, date: transitDate, source: 'straits.live/PortWatch' }
+        ]);
+        log.push(`[STRAITS] hormuz_portwatch: ${sl.transits.count}/day (${added} new)`);
+      }
+
+      if (sl.aisGaps) {
+        const added = await appendToHistory(redis, 'series:n2:hormuz_dark_ais', [
+          { value: sl.aisGaps.count, date: today, source: 'straits.live/AIS' }
+        ]);
+        log.push(`[STRAITS] hormuz_dark_ais: ${sl.aisGaps.count} (${added} new)`);
+      }
+
+      if (sl.strandedOffshore !== undefined) {
+        const added = await appendToHistory(redis, 'series:n2:stranded_offshore', [
+          { value: sl.strandedOffshore, date: today, source: 'straits.live/AIS' }
+        ]);
+        log.push(`[STRAITS] stranded_offshore: ${sl.strandedOffshore} (${added} new)`);
+      }
+
+      // Chokepoint comparison
+      if (sl.chokepoints && Array.isArray(sl.chokepoints)) {
+        for (const cp of sl.chokepoints) {
+          const cpDate = cp.date || today;
+          let key = null;
+          if (cp.key === 'bab-el-mandeb') key = 'bab_portwatch';
+          if (cp.key === 'suez') key = 'suez_portwatch';
+          if (cp.key === 'cape') key = 'cape_portwatch';
+          if (key) {
+            const added = await appendToHistory(redis, `series:n2:${key}`, [
+              { value: cp.nTotal, date: cpDate, source: 'straits.live/PortWatch' }
+            ]);
+            log.push(`[STRAITS] ${key}: ${cp.nTotal}/day (${added} new)`);
+          }
+        }
+      }
+
+      // N7 — Insurance & risk premium
+      if (sl.insurance) {
+        const insDate = sl.insurance.updatedAt ? sl.insurance.updatedAt.split('T')[0] : today;
+        await appendToHistory(redis, 'series:n7:insurance_multiple', [
+          { value: sl.insurance.multiple, date: insDate, source: 'straits.live' }
+        ]);
+        await appendToHistory(redis, 'series:n7:vlcc_premium_high', [
+          { value: sl.insurance.vlccPremiumHigh, date: insDate, source: 'straits.live' }
+        ]);
+        const clubCount = sl.insurance.withdrawnClubs ? sl.insurance.withdrawnClubs.length : 0;
+        await appendToHistory(redis, 'series:n7:clubs_withdrawn', [
+          { value: clubCount, date: insDate, source: 'straits.live' }
+        ]);
+        log.push(`[STRAITS] insurance: ${sl.insurance.multiple}x, premium $${sl.insurance.vlccPremiumHigh}, ${clubCount} clubs withdrawn`);
+      }
+
+      // N8 — Sanctions / vessel risk
+      if (sl.vesselRisk) {
+        const added = await appendToHistory(redis, 'series:n8:vessels_high_risk', [
+          { value: sl.vesselRisk.high, date: today, source: 'straits.live/AIS+OFAC' }
+        ]);
+        log.push(`[STRAITS] vessels_high_risk: ${sl.vesselRisk.high} (${added} new)`);
+      }
+
+      if (sl.carrierSuspensions && Array.isArray(sl.carrierSuspensions)) {
+        const rerouting = sl.carrierSuspensions.filter(c => c.status === 'rerouting' || c.status === 'suspended').length;
+        const added = await appendToHistory(redis, 'series:n8:carriers_rerouting', [
+          { value: rerouting, date: today, source: 'straits.live' }
+        ]);
+        log.push(`[STRAITS] carriers_rerouting: ${rerouting} of ${sl.carrierSuspensions.length} (${added} new)`);
+      }
+
+    } catch (err) {
+      log.push(`[STRAITS] ERROR — ${err.message}`);
+    }
+
     // Update timestamp
     const now = new Date().toISOString();
     await redis.set('meta:last_cron', now);
