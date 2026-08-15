@@ -137,6 +137,55 @@ header h1 {
   border-bottom: 1px solid var(--border);
 }
 
+.status-summary {
+  display: flex;
+  gap: 0.4rem;
+  padding: 1rem 0;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.summary-chip {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.7rem;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  flex: 1;
+  min-width: 0;
+}
+
+.summary-chip .status-dot {
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
+}
+
+.summary-id {
+  font-family: var(--font-data);
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.summary-name {
+  font-family: var(--font-body);
+  font-size: 0.78rem;
+  color: var(--primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 700px) {
+  .status-summary { gap: 0.3rem; }
+  .summary-chip { padding: 0.3rem 0.5rem; }
+  .summary-name { display: none; }
+}
+
 /* Node cards */
 .node-grid {
   display: grid;
@@ -445,6 +494,8 @@ header h1 {
     <div class="meta-line" id="last-updated">Loading...</div>
   </header>
 
+  <div class="status-summary" id="status-summary"></div>
+
   <div class="section-label">Physical Chain</div>
   <div class="node-grid" id="physical-nodes"></div>
 
@@ -576,6 +627,18 @@ async function loadDashboard() {
 
 // Render
 function renderDashboard(data) {
+  // Summary status row
+  const summaryEl = document.getElementById('status-summary');
+  summaryEl.innerHTML = data.nodes.map(node => {
+    const status = node.status?.current || 'unknown';
+    const override = node.status?.override ? ' (override)' : '';
+    return `<div class="summary-chip" title="${node.name}: ${status}${override}">
+      <div class="status-dot ${status}"></div>
+      <span class="summary-id">${node.id}</span>
+      <span class="summary-name">${node.name}</span>
+    </div>`;
+  }).join('');
+
   const physicalEl = document.getElementById('physical-nodes');
   const permissionEl = document.getElementById('permission-nodes');
   physicalEl.innerHTML = '';
