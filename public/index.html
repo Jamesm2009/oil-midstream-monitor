@@ -346,6 +346,26 @@ header h1 {
   height: 40px;
 }
 
+.sparkline-caption {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-top: 0.2rem;
+}
+
+.sparkline-label {
+  font-family: var(--font-data);
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.sparkline-dates {
+  font-family: var(--font-data);
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
 /* Manual input */
 .input-section {
   margin-top: 3rem;
@@ -729,7 +749,7 @@ function createNodeCard(node) {
   // Load sparkline for the first series with data
   const firstWithData = node.series.find(s => s.historyLength > 1);
   if (firstWithData) {
-    setTimeout(() => loadSparkline(node.id, firstWithData.key), 100);
+    setTimeout(() => loadSparkline(node.id, firstWithData.key, firstWithData.label), 100);
   }
 
   return card;
@@ -755,7 +775,7 @@ function formatValue(value, unit) {
 }
 
 // Sparklines
-async function loadSparkline(nodeId, seriesKey) {
+async function loadSparkline(nodeId, seriesKey, seriesLabel) {
   try {
     const res = await fetch(`/api/history?node=${nodeId}&series=${seriesKey}`);
     if (!res.ok) return;
@@ -804,6 +824,14 @@ async function loadSparkline(nodeId, seriesKey) {
     ctx.closePath();
     ctx.fillStyle = 'rgba(46, 109, 164, 0.08)';
     ctx.fill();
+
+    // Add label and date range below the chart
+    const startDate = points[0].date;
+    const endDate = points[points.length - 1].date;
+    const caption = document.createElement('div');
+    caption.className = 'sparkline-caption';
+    caption.innerHTML = `<span class="sparkline-label">${seriesLabel || seriesKey}</span><span class="sparkline-dates">${startDate} → ${endDate}</span>`;
+    container.appendChild(caption);
   } catch (e) {
     console.error('Sparkline error:', e);
   }
