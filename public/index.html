@@ -242,6 +242,50 @@ header h1 {
   font-weight: 500;
 }
 
+.info-icon {
+  margin-left: auto;
+  font-size: 1rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0.5;
+  transition: opacity 0.15s;
+  user-select: none;
+}
+
+.info-icon:hover {
+  opacity: 1;
+  color: var(--accent);
+}
+
+.source-panel {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 0.8rem 1rem;
+  margin-bottom: 0.8rem;
+}
+
+.source-panel-title {
+  font-family: var(--font-data);
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 0.5rem;
+}
+
+.source-item {
+  font-family: var(--font-body);
+  font-size: 0.82rem;
+  color: var(--text);
+  padding: 0.25rem 0;
+  border-bottom: 1px dotted var(--border);
+}
+
+.source-item:last-child {
+  border-bottom: none;
+}
+
 .sparkline-container {
   margin-top: 0.5rem;
   height: 40px;
@@ -595,13 +639,26 @@ function createNodeCard(node) {
       </div>`;
   }
 
+  // Source info panel
+  let sourcesHTML = '';
+  if (node.manualSources && node.manualSources.length > 0) {
+    const sourceItems = node.manualSources.map(s => `<div class="source-item">${s}</div>`).join('');
+    sourcesHTML = `
+      <div class="source-panel" id="sources-${node.id}" style="display:none;">
+        <div class="source-panel-title">Data Sources</div>
+        ${sourceItems}
+      </div>`;
+  }
+
   card.innerHTML = `
     <div class="node-header">
       <div class="status-dot ${statusClass}" title="${statusClass}${overrideNote}"></div>
       <span class="node-id">${node.id}</span>
       <span class="node-name">${node.name}</span>
+      <span class="info-icon" onclick="toggleSources('${node.id}')" title="Data sources">ⓘ</span>
     </div>
     <div class="node-summary">${node.summary}</div>
+    ${sourcesHTML}
     <div class="series-list">${seriesHTML}</div>
     <div class="sparkline-container" id="spark-${node.id}"></div>
   `;
@@ -613,6 +670,13 @@ function createNodeCard(node) {
   }
 
   return card;
+}
+
+function toggleSources(nodeId) {
+  const panel = document.getElementById(`sources-${nodeId}`);
+  if (panel) {
+    panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+  }
 }
 
 function formatValue(value, unit) {
