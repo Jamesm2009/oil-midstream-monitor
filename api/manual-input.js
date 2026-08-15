@@ -32,9 +32,17 @@ module.exports = async (req, res) => {
     let history = (await redis.get(redisKey)) || [];
     if (!Array.isArray(history)) history = [];
 
+    // Parse value — strip commas and whitespace from numeric inputs
+    let parsedValue = value;
+    if (typeof value === 'string') {
+      const cleaned = value.replace(/[,\s]/g, '');
+      const num = parseFloat(cleaned);
+      parsedValue = isNaN(num) ? value : num; // keep as string only if not a number (e.g. "text" fields)
+    }
+
     // Create new data point
     const point = {
-      value: typeof value === 'string' ? value : parseFloat(value),
+      value: parsedValue,
       date: date,
       source: source || 'manual',
     };
