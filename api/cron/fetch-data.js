@@ -26,7 +26,6 @@ const FRED_CRACK_INPUTS = {
 };
 
 async function fetchEIA(seriesId, apiKey) {
-  // Try v2 seriesid endpoint first
   const url = `https://api.eia.gov/v2/seriesid/${seriesId}?api_key=${apiKey}&length=5&sort[0][column]=period&sort[0][direction]=desc`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`EIA API error: ${res.status}`);
@@ -37,7 +36,7 @@ async function fetchEIA(seriesId, apiKey) {
       value: parseFloat(d.value),
       date: d.period,
       source: 'EIA',
-    })).reverse(); // oldest first
+    })).reverse();
   }
   return [];
 }
@@ -56,7 +55,7 @@ async function fetchFRED(seriesId, apiKey) {
         date: o.date,
         source: 'FRED',
       }))
-      .reverse(); // oldest first
+      .reverse();
   }
   return [];
 }
@@ -82,9 +81,13 @@ async function appendToHistory(redis, redisKey, newPoints) {
   return added;
 }
 
+async function fetchStraits() {
+  const straitsRes = await fetch('https://straits.live/status');
+  if (!straitsRes.ok) throw new Error(`straits.live ${straitsRes.status}`);
+  return straitsRes.json();
+}
+
 module.exports = async (req, res) => {
-  // Verify cron secret (Vercel sends this header for cron jobs)
-  // On Vercel, cron jobs are authenticated automatically
   const startTime = Date.now();
   const log = [];
 
@@ -98,35 +101,70 @@ module.exports = async (req, res) => {
       return res.status(500).json({ error: 'Missing API keys', log });
     }
 
-    // Fetch EIA series
-    for (const s of EIA_SERIES) {
-      try {
-        const points = await fetchEIA(s.seriesId, eiaKey);
-        const redisKey = `series:${s.node}:${s.key}`;
-        const added = await appendToHistory(redis, redisKey, points);
-        log.push(`[EIA] ${s.key}: ${points.length} fetched, ${added} new`);
-      } catch (err) {
-        log.push(`[EIA] ${s.key}: ERROR — ${err.message}`);
+    // ── PHASE 1: Fire ALL external API calls in parallel ──
+    // This is the key fix: instead of waiting for each call sequentially
+    // (~8s × 15 calls = ~120s), we fire them all at once and wait for
+    // the slowest one (~8s total).
+
+    const eiaPromises = EIA_SERIES.map(s =>
+      fetchEIA(s.seriesId, eiaKey)
+        .then(points => ({ status: 'ok', key: s.key, node: s.node, points }))
+        .catch(err => ({ status: 'error', key: s.key, error: err.message }))
+    );
+
+    const fredPromises = FRED_SERIES.map(s =>
+      fetchFRED(s.seriesId, fredKey)
+        .then(points => ({ status: 'ok', key: s.key, node: s.node, points }))
+        .catch(err => ({ status: 'error', key: s.key, error: err.message }))
+    );
+
+    const crackPromises = [
+      fetchFRED('DCOILWTICO', fredKey).catch(() => []),
+      fetchFRED(FRED_CRACK_INPUTS.gasoline.seriesId, fredKey).catch(() => []),
+      fetchFRED(FRED_CRACK_INPUTS.diesel.seriesId, fredKey).catch(() => []),
+    ];
+
+    const straitsPromise = fetchStraits()
+      .then(data => ({ status: 'ok', data }))
+      .catch(err => ({ status: 'error', error: err.message }));
+
+    // Wait for everything at once
+    const [eiaResults, fredResults, crackResults, straitsResult] = await Promise.all([
+      Promise.all(eiaPromises),
+      Promise.all(fredPromises),
+      Promise.all(crackPromises),
+      straitsPromise,
+    ]);
+
+    log.push(`API calls completed in ${Date.now() - startTime}ms`);
+
+    // ── PHASE 2: Process results and write to Redis ──
+
+    // EIA series
+    for (const r of eiaResults) {
+      if (r.status === 'error') {
+        log.push(`[EIA] ${r.key}: ERROR — ${r.error}`);
+        continue;
       }
+      const redisKey = `series:${r.node}:${r.key}`;
+      const added = await appendToHistory(redis, redisKey, r.points);
+      log.push(`[EIA] ${r.key}: ${r.points.length} fetched, ${added} new`);
     }
 
-    // Fetch FRED price series
-    for (const s of FRED_SERIES) {
-      try {
-        const points = await fetchFRED(s.seriesId, fredKey);
-        const redisKey = `series:${s.node}:${s.key}`;
-        const added = await appendToHistory(redis, redisKey, points);
-        log.push(`[FRED] ${s.key}: ${points.length} fetched, ${added} new`);
-      } catch (err) {
-        log.push(`[FRED] ${s.key}: ERROR — ${err.message}`);
+    // FRED series
+    for (const r of fredResults) {
+      if (r.status === 'error') {
+        log.push(`[FRED] ${r.key}: ERROR — ${r.error}`);
+        continue;
       }
+      const redisKey = `series:${r.node}:${r.key}`;
+      const added = await appendToHistory(redis, redisKey, r.points);
+      log.push(`[FRED] ${r.key}: ${r.points.length} fetched, ${added} new`);
     }
 
-    // Fetch crack spread inputs and calculate
+    // Crack spread calculations
     try {
-      const wtiPoints = await fetchFRED('DCOILWTICO', fredKey);
-      const gasPoints = await fetchFRED(FRED_CRACK_INPUTS.gasoline.seriesId, fredKey);
-      const dieselPoints = await fetchFRED(FRED_CRACK_INPUTS.diesel.seriesId, fredKey);
+      const [wtiPoints, gasPoints, dieselPoints] = crackResults;
 
       // If diesel primary is empty, try fallback
       let dieselFinal = dieselPoints;
@@ -135,7 +173,7 @@ module.exports = async (req, res) => {
         log.push('[FRED] diesel: using DHOILNYH fallback');
       }
 
-      // Calculate gasoline crack: (gasoline $/gal × 42) - WTI $/bbl
+      // Gasoline crack: (gasoline $/gal × 42) - WTI $/bbl
       if (wtiPoints.length > 0 && gasPoints.length > 0) {
         const latest = gasPoints[gasPoints.length - 1];
         const wtiMatch = wtiPoints.find(w => w.date === latest.date) || wtiPoints[wtiPoints.length - 1];
@@ -145,7 +183,7 @@ module.exports = async (req, res) => {
         log.push(`[CALC] gasoline_crack: $${crackPoint.value}/bbl (${added} new)`);
       }
 
-      // Calculate diesel crack: (diesel $/gal × 42) - WTI $/bbl
+      // Diesel crack: (diesel $/gal × 42) - WTI $/bbl
       if (wtiPoints.length > 0 && dieselFinal.length > 0) {
         const latest = dieselFinal[dieselFinal.length - 1];
         const wtiMatch = wtiPoints.find(w => w.date === latest.date) || wtiPoints[wtiPoints.length - 1];
@@ -158,11 +196,11 @@ module.exports = async (req, res) => {
       log.push(`[CALC] crack spreads: ERROR — ${err.message}`);
     }
 
-    // Fetch straits.live status bundle (free, no API key, CC0 licensed)
-    try {
-      const straitsRes = await fetch('https://straits.live/status');
-      if (!straitsRes.ok) throw new Error(`straits.live ${straitsRes.status}`);
-      const sl = await straitsRes.json();
+    // Straits.live processing
+    if (straitsResult.status === 'error') {
+      log.push(`[STRAITS] ERROR — ${straitsResult.error}`);
+    } else {
+      const sl = straitsResult.data;
       const today = sl.asOf ? sl.asOf.split('T')[0] : new Date().toISOString().split('T')[0];
 
       // N1 — Pipeline bypass utilisation
@@ -254,9 +292,6 @@ module.exports = async (req, res) => {
         ]);
         log.push(`[STRAITS] carriers_rerouting: ${rerouting} of ${sl.carrierSuspensions.length} (${added} new)`);
       }
-
-    } catch (err) {
-      log.push(`[STRAITS] ERROR — ${err.message}`);
     }
 
     // Update timestamp
