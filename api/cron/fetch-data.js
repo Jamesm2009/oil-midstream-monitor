@@ -1,308 +1,263 @@
-const { getRedis } = require('../../lib/redis');
+// Config-driven node definitions
+// This is the source of truth for all eight nodes.
+// Adding a node here automatically creates a card on the dashboard.
 
-// EIA v1-compatible series (backward-compatible with v2)
-const EIA_SERIES = [
-  { key: 'spr_level', node: 'n4', seriesId: 'PET.WCSSTUS1.W', freq: 'weekly' },
-  { key: 'cushing', node: 'n4', seriesId: 'PET.W_EPC0_SAX_YCUOK_MBBL.W', freq: 'weekly' },
-  { key: 'commercial_crude', node: 'n4', seriesId: 'PET.WCESTUS1.W', freq: 'weekly' },
-  { key: 'gasoline_stocks', node: 'n4', seriesId: 'PET.WGTSTUS1.W', freq: 'weekly' },
-  { key: 'distillate_stocks', node: 'n4', seriesId: 'PET.WDISTUS1.W', freq: 'weekly' },
-  { key: 'refinery_utilisation', node: 'n4', seriesId: 'PET.WPULEUS3.W', freq: 'weekly' },
-  { key: 'us_crude_exports', node: 'n6', seriesId: 'PET.MCREXUS2.M', freq: 'monthly' },
+const NODES = [
+  {
+    id: 'n1',
+    name: 'Gulf Production & Bypass',
+    category: 'physical',
+    summary: 'Bypass pipeline utilisation vs capacity, Fujairah/Yanbu split',
+    keyMetric: 'Bypass utilisation as % of capacity',
+    phase: 2,
+    manualSources: [
+      'straits.live /status → pipelineBypass — automated (Petroline, ADCOP, Goreh-Jask)',
+      'IEA Oil Market Report (monthly, paywalled) — detailed bypass analysis',
+      'Kpler blog — Gulf export volumes (free, monthly recap)',
+      'Windward AI / Vortexa — Fujairah vs Yanbu loading split',
+    ],
+    thresholdInfo: [
+      'RED: Petroline ≥98% AND ADCOP at 100% (no spare bypass capacity)',
+      'AMBER: Petroline ≥90%',
+      'Fallback: manual bypass >5.0M bbl/d = red, >4.7M = amber',
+    ],
+    series: [
+      { key: 'petroline_pct', label: 'Petroline utilisation (5M bpd)', unit: '%', manual: false, cadence: 'weekly', source: 'straits.live' },
+      { key: 'adcop_pct', label: 'ADCOP utilisation (1.5M bpd)', unit: '%', manual: false, cadence: 'weekly', source: 'straits.live' },
+      { key: 'bypass_utilisation', label: 'Bypass utilisation (manual)', unit: 'M bbl/d', manual: true, cadence: 'monthly' },
+      { key: 'gulf_exports', label: 'Gulf crude exports', unit: 'M bbl/d', manual: true, cadence: 'monthly' },
+      { key: 'fujairah_yanbu_split', label: 'Fujairah vs Yanbu split', unit: '%', manual: true, cadence: 'assessment' },
+    ],
+  },
+  {
+    id: 'n2',
+    name: 'Chokepoint Transit',
+    category: 'physical',
+    summary: 'Hormuz, Bab el-Mandeb, Suez — inbound/outbound + dark transits',
+    keyMetric: 'Hormuz outbound transits',
+    phase: 2,
+    manualSources: [
+      'Windward AI MIOC dashboard — Hormuz in/out, dark transits (manual)',
+      'Windward AI MIOC dashboard — Bab el-Mandeb, Suez crossings (manual, 8-day rolling)',
+      'straits.live /status — automated: IMF PortWatch daily counts, AIS dark fleet, stranded vessels',
+      'straits.live /api/v1/chokepoints — automated: 5-chokepoint daily comparison',
+    ],
+    thresholdInfo: [
+      'RED: Hormuz PortWatch ≤15 transits/day',
+      'RED: Hormuz outbound <30 AND Bab el-Mandeb outbound <5 simultaneously',
+      'AMBER: PortWatch ≤30/day',
+      'AMBER: Inbound <70% of outbound (tankers refusing to enter)',
+      'AMBER: Dark transits >30% of outbound, or AIS dark count >60',
+      'AMBER: Stranded vessels >500',
+    ],
+    series: [
+      { key: 'hormuz_portwatch', label: 'Hormuz transits (PortWatch)', unit: '/day', manual: false, cadence: 'daily', source: 'PortWatch' },
+      { key: 'hormuz_tanker', label: 'Hormuz tanker transits', unit: '/day', manual: false, cadence: 'daily', source: 'PortWatch' },
+      { key: 'hormuz_dark_ais', label: 'Hormuz AIS dark count', unit: 'vessels', manual: false, cadence: 'daily', source: 'straits.live' },
+      { key: 'stranded_offshore', label: 'Stranded vessels (offshore)', unit: 'vessels', manual: false, cadence: 'daily', source: 'straits.live' },
+      { key: 'bab_portwatch', label: 'Bab el-Mandeb (PortWatch)', unit: '/day', manual: false, cadence: 'daily', source: 'PortWatch' },
+      { key: 'bab_tanker', label: 'Bab el-Mandeb tankers', unit: '/day', manual: false, cadence: 'daily', source: 'PortWatch' },
+      { key: 'suez_portwatch', label: 'Suez (PortWatch)', unit: '/day', manual: false, cadence: 'daily', source: 'PortWatch' },
+      { key: 'suez_tanker', label: 'Suez tankers', unit: '/day', manual: false, cadence: 'daily', source: 'PortWatch' },
+      { key: 'cape_portwatch', label: 'Cape of Good Hope (PortWatch)', unit: '/day', manual: false, cadence: 'daily', source: 'PortWatch' },
+      { key: 'cape_tanker', label: 'Cape tankers', unit: '/day', manual: false, cadence: 'daily', source: 'PortWatch' },
+      { key: 'hormuz_outbound', label: 'Hormuz outbound (Windward)', unit: '/day', manual: true, cadence: 'weekly' },
+      { key: 'hormuz_inbound', label: 'Hormuz inbound (Windward)', unit: '/day', manual: true, cadence: 'weekly' },
+      { key: 'hormuz_dark', label: 'Hormuz dark (Windward)', unit: '/day', manual: true, cadence: 'weekly' },
+      { key: 'bab_outbound', label: 'Bab el-Mandeb out (Windward 8d)', unit: '/8d', manual: true, cadence: 'weekly' },
+      { key: 'bab_inbound', label: 'Bab el-Mandeb in (Windward 8d)', unit: '/8d', manual: true, cadence: 'weekly' },
+      { key: 'suez_outbound', label: 'Suez out (Windward 8d)', unit: '/8d', manual: true, cadence: 'weekly' },
+      { key: 'suez_inbound', label: 'Suez in (Windward 8d)', unit: '/8d', manual: true, cadence: 'weekly' },
+    ],
+  },
+  {
+    id: 'n3',
+    name: 'Tanker Availability',
+    category: 'physical',
+    summary: 'Floating storage, freight benchmarks (TD3C institutional vs Yanbu actual), shadow fleet share',
+    keyMetric: 'World floating storage',
+    phase: 2,
+    manualSources: [
+      'MacroMicro (Vortexa data) — floating storage: world + Middle East (free chart, weekly)',
+      'Baltic Exchange (via trade press) — TD3C VLCC benchmark (NOTE: since Feb 2026 this is a Yanbu-referenced synthetic, not a Ras Tanura fixture — see Fairway ETA "The Index That Doesn\'t Exist")',
+      'Broker reporting (via trade press) — Yanbu→East actual freight clearing rate',
+      'Clarksons / shipping press — 12-month time charter rate',
+      'KSE / CREA reports (PDF) — shadow fleet carriage share',
+    ],
+    thresholdInfo: [
+      'RED: World floating storage >140,000 K bbl (crisis-level fleet absorption)',
+      'RED: Middle East floating storage >30,000 K bbl (severe Gulf congestion)',
+      'AMBER: World floating storage >120,000 K bbl (capacity being absorbed)',
+      'AMBER: Middle East floating storage >25,000 K bbl (Gulf congestion building)',
+      'AMBER: Shadow fleet carriage share outside 23–33% band',
+      'NOTE: TD3C is currently synthetic — panellists reference Yanbu fixtures + risk premium, not Ras Tanura. ~$5/bbl gap vs actual freight.',
+    ],
+    series: [
+      { key: 'floating_storage_world', label: 'World floating storage (Vortexa)', unit: 'K bbl', manual: true, cadence: 'weekly' },
+      { key: 'floating_storage_mideast', label: 'Middle East floating storage', unit: 'K bbl', manual: true, cadence: 'weekly' },
+      { key: 'vlcc_spot', label: 'TD3C benchmark (institutional)', unit: '$/day', manual: true, cadence: 'weekly' },
+      { key: 'vlcc_period', label: '12-month time charter', unit: '$/day', manual: true, cadence: 'weekly' },
+      { key: 'shadow_fleet_share', label: 'Shadow fleet carriage share', unit: '%', manual: true, cadence: 'monthly' },
+    ],
+  },
+  {
+    id: 'n4',
+    name: 'Storage Buffers',
+    category: 'physical',
+    summary: 'SPR, Cushing, commercial stocks, product inventories, refinery utilisation',
+    keyMetric: 'SPR level vs congressional floor',
+    phase: 1,
+    manualSources: [
+      'EIA Weekly Petroleum Status Report — automated (SPR, Cushing, stocks, utilisation)',
+      'Satellite analysts / EIA estimates — Chinese strategic reserves (quarterly)',
+      'FEDCom / S&P Global (via trade press) — Fujairah commercial stocks',
+    ],
+    thresholdInfo: [
+      'RED: SPR draw rate >4M bbl/week, or Cushing <18M bbl',
+      'AMBER: SPR draw >2.5M/week, or Cushing <22M bbl',
+      'AMBER: SPR weeks-to-floor <12 weeks (vs DOE contracted floor ~282M bbl)',
+      'Draw rate = rolling average over last 4 weekly readings',
+    ],
+    series: [
+      { key: 'spr_level', label: 'US SPR level', unit: 'K bbl', manual: false, cadence: 'weekly', source: 'EIA', eiaId: 'PET.WCSSTUS1.W' },
+      { key: 'cushing', label: 'Cushing OK crude stocks', unit: 'K bbl', manual: false, cadence: 'weekly', source: 'EIA', eiaId: 'PET.W_EPC0_SAX_YCUOK_MBBL.W' },
+      { key: 'commercial_crude', label: 'US commercial crude stocks', unit: 'K bbl', manual: false, cadence: 'weekly', source: 'EIA', eiaId: 'PET.WCESTUS1.W' },
+      { key: 'gasoline_stocks', label: 'US gasoline inventories', unit: 'K bbl', manual: false, cadence: 'weekly', source: 'EIA', eiaId: 'PET.WGTSTUS1.W' },
+      { key: 'distillate_stocks', label: 'US distillate inventories', unit: 'K bbl', manual: false, cadence: 'weekly', source: 'EIA', eiaId: 'PET.WDISTUS1.W' },
+      { key: 'refinery_utilisation', label: 'Refinery utilisation', unit: '%', manual: false, cadence: 'weekly', source: 'EIA', eiaId: 'PET.WPULEUS3.W' },
+      { key: 'chinese_spr', label: 'Chinese strategic reserves', unit: 'M bbl', manual: true, cadence: 'quarterly' },
+      { key: 'fujairah_stocks', label: 'Fujairah commercial stocks', unit: 'M bbl', manual: true, cadence: 'weekly' },
+    ],
+  },
+  {
+    id: 'n5',
+    name: 'Refining & Products',
+    category: 'physical',
+    summary: 'WTI-Brent spread, crack spreads, product tightness',
+    keyMetric: 'Diesel crack spread',
+    phase: 1,
+    manualSources: [
+      'FRED / EIA — automated (WTI, Brent, yields, crack spreads)',
+      'Kpler / IEA — Asian distillate exports (paywalled/blog, monthly)',
+      'Reuters / trade press — Chinese product-export quotas',
+      'Trade press — Singapore refining margins',
+    ],
+    thresholdInfo: [
+      'RED: Diesel crack spread >$40/bbl',
+      'AMBER: Diesel crack >$30/bbl',
+      'AMBER: Gasoline crack >$25/bbl',
+      'AMBER: WTI-Brent spread >$12/bbl',
+    ],
+    series: [
+      { key: 'wti', label: 'WTI spot price', unit: '$/bbl', manual: false, cadence: 'daily', source: 'FRED', fredId: 'DCOILWTICO' },
+      { key: 'brent', label: 'Brent spot price', unit: '$/bbl', manual: false, cadence: 'daily', source: 'FRED', fredId: 'DCOILBRENTEU' },
+      { key: 'gasoline_crack', label: 'Gasoline crack spread', unit: '$/bbl', manual: false, cadence: 'daily', source: 'calculated' },
+      { key: 'diesel_crack', label: 'Diesel crack spread', unit: '$/bbl', manual: false, cadence: 'daily', source: 'calculated' },
+      { key: 'yield_10y', label: '10Y Treasury yield', unit: '%', manual: false, cadence: 'daily', source: 'FRED', fredId: 'DGS10' },
+      { key: 'yield_30y', label: '30Y Treasury yield', unit: '%', manual: false, cadence: 'daily', source: 'FRED', fredId: 'DGS30' },
+      { key: 'singapore_margin', label: 'Singapore refining margin', unit: '$/bbl', manual: true, cadence: 'weekly' },
+    ],
+  },
+  {
+    id: 'n6',
+    name: 'Alternative Supply Routes',
+    category: 'physical',
+    summary: 'US crude exports, Atlantic basin substitution',
+    keyMetric: 'US crude exports',
+    phase: 1,
+    manualSources: [
+      'EIA — automated (US crude exports, monthly)',
+      'Petrobras quarterly + ANP — Brazil crude exports',
+      'Hess quarterly / trade press — Guyana production',
+      'Argus (via trade press) — West African differentials',
+    ],
+    thresholdInfo: [
+      'RED: West African differentials >$8/bbl (backup route saturated)',
+      'AMBER: West African differentials >$5/bbl',
+    ],
+    series: [
+      { key: 'us_crude_exports', label: 'US crude exports (monthly)', unit: 'K bbl/d', manual: false, cadence: 'monthly', source: 'EIA', eiaId: 'PET.MCREXUS2.M' },
+      { key: 'us_crude_exports_wk', label: 'US crude exports (weekly)', unit: 'K bbl/d', manual: false, cadence: 'weekly', source: 'EIA', eiaId: 'PET.WCREXUS2.W' },
+      { key: 'brazil_exports', label: 'Brazil crude exports', unit: 'M bbl/d', manual: true, cadence: 'quarterly' },
+      { key: 'guyana_production', label: 'Guyana production', unit: 'K bbl/d', manual: true, cadence: 'quarterly' },
+      { key: 'west_africa_diff', label: 'West African differentials', unit: '$/bbl', manual: true, cadence: 'weekly' },
+    ],
+  },
+  {
+    id: 'n7',
+    name: 'Insurance & Risk Premium',
+    category: 'permission',
+    summary: 'War-risk premium, JWC listed areas, reinsurer status',
+    keyMetric: 'War-risk insurance multiple',
+    phase: 3,
+    manualSources: [
+      'straits.live /status → insurance — automated (multiple, VLCC premium, withdrawn clubs)',
+      'straits.live /api/v1/jwc — automated (JWC listed areas)',
+      "Lloyd's List / TradeWinds — war-risk premium quotes (manual detail)",
+      'FT / trade press — DFC reinsurer policy status',
+      'Trade press — India sovereign reinsurance pool',
+    ],
+    thresholdInfo: [
+      'RED: Insurance multiple ≥20x peacetime, or ≥4 P&I clubs withdrawn',
+      'AMBER: Insurance multiple ≥10x, or ≥2 clubs withdrawn',
+      'Fallback: manual war-risk band upper >5% = red, >3% = amber',
+    ],
+    series: [
+      { key: 'insurance_multiple', label: 'Insurance multiple (vs peacetime)', unit: 'x', manual: false, cadence: 'weekly', source: 'straits.live' },
+      { key: 'vlcc_premium_high', label: 'VLCC premium (high)', unit: '$', manual: false, cadence: 'weekly', source: 'straits.live' },
+      { key: 'clubs_withdrawn', label: 'P&I clubs withdrawn', unit: 'count', manual: false, cadence: 'weekly', source: 'straits.live' },
+      { key: 'warrisk_band', label: 'War-risk premium band', unit: '% hull', manual: true, cadence: 'weekly' },
+      { key: 'jwc_areas', label: 'JWC listed areas', unit: 'text', manual: true, cadence: 'as_changed' },
+      { key: 'dfc_status', label: 'DFC reinsurer status', unit: 'text', manual: true, cadence: 'as_changed' },
+      { key: 'india_pool', label: 'India sovereign pool status', unit: 'text', manual: true, cadence: 'as_changed' },
+    ],
+  },
+  {
+    id: 'n8',
+    name: 'Sanctions Architecture',
+    category: 'permission',
+    summary: 'Price cap, shadow fleet designations, OFAC waivers, carrier posture',
+    keyMetric: 'OFAC waiver cadence',
+    phase: 2,
+    manualSources: [
+      'straits.live /status → vesselRisk — automated (high-risk vessel count)',
+      'straits.live /status → carrierSuspensions — automated (carriers rerouting)',
+      'OFAC announcements / trade press — waiver/revocation cadence',
+      'EU Council decisions — price cap level, dynamic mechanism status',
+      'UK/EU/US sanction lists (gov sites) — shadow fleet designations',
+      'KSE / CREA reports (PDF) — G7-linked carriage share',
+    ],
+    thresholdInfo: [
+      'RED: ≥7 major carriers rerouting',
+      'RED: >80 high-risk vessels (OFAC SDN matches)',
+      'AMBER: ≥4 carriers rerouting, or >40 high-risk vessels',
+      'AMBER: G7-linked carriage share >30%',
+    ],
+    series: [
+      { key: 'vessels_high_risk', label: 'High-risk vessels (OFAC match)', unit: 'count', manual: false, cadence: 'daily', source: 'straits.live' },
+      { key: 'carriers_rerouting', label: 'Major carriers rerouting', unit: 'count', manual: false, cadence: 'weekly', source: 'straits.live' },
+      { key: 'price_cap', label: 'G7 price cap level', unit: '$/bbl', manual: true, cadence: 'as_changed' },
+      { key: 'shadow_designations', label: 'Shadow fleet designations', unit: 'cumulative', manual: true, cadence: 'monthly' },
+      { key: 'ofac_waivers', label: 'OFAC waivers issued', unit: 'count', manual: true, cadence: 'monthly' },
+      { key: 'g7_carriage_share', label: 'G7-linked carriage share', unit: '%', manual: true, cadence: 'monthly' },
+    ],
+  },
 ];
 
-// FRED daily series
-const FRED_SERIES = [
-  { key: 'wti', node: 'n5', seriesId: 'DCOILWTICO' },
-  { key: 'brent', node: 'n5', seriesId: 'DCOILBRENTEU' },
-  { key: 'yield_10y', node: 'n5', seriesId: 'DGS10' },
-  { key: 'yield_30y', node: 'n5', seriesId: 'DGS30' },
-];
-
-// FRED series for crack spread inputs (not stored directly)
-const FRED_CRACK_INPUTS = {
-  gasoline: { seriesId: 'DGASNYH', fallback: null },
-  diesel: { seriesId: 'DDFUELNYH', fallback: 'DHOILNYH' },
+// FRED series needed for crack spread calculations (not stored directly as node series)
+const FRED_INPUTS = {
+  gasoline_spot: { fredId: 'DGASNYH', label: 'Gasoline spot (NY Harbor)', unit: '$/gal', fallback: null },
+  ulsd_spot: { fredId: 'DDFUELNYH', label: 'ULSD spot (NY Harbor)', unit: '$/gal', fallback: 'DHOILNYH' },
 };
 
-async function fetchEIA(seriesId, apiKey) {
-  const url = `https://api.eia.gov/v2/seriesid/${seriesId}?api_key=${apiKey}&length=5&sort[0][column]=period&sort[0][direction]=desc`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`EIA API error: ${res.status}`);
-  const data = await res.json();
-
-  if (data?.response?.data && data.response.data.length > 0) {
-    return data.response.data.map(d => ({
-      value: parseFloat(d.value),
-      date: d.period,
-      source: 'EIA',
-    })).reverse();
-  }
-  return [];
-}
-
-async function fetchFRED(seriesId, apiKey) {
-  const url = `https://api.stlouisfed.org/fred/series/observations?series_id=${seriesId}&api_key=${apiKey}&file_type=json&sort_order=desc&limit=5`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`FRED API error: ${res.status}`);
-  const data = await res.json();
-
-  if (data?.observations) {
-    return data.observations
-      .filter(o => o.value !== '.')
-      .map(o => ({
-        value: parseFloat(o.value),
-        date: o.date,
-        source: 'FRED',
-      }))
-      .reverse();
-  }
-  return [];
-}
-
-async function appendToHistory(redis, redisKey, newPoints) {
-  let history = (await redis.get(redisKey)) || [];
-  if (!Array.isArray(history)) history = [];
-
-  let added = 0;
-  for (const point of newPoints) {
-    const exists = history.some(h => h.date === point.date);
-    if (!exists) {
-      history.push(point);
-      added++;
-    }
-  }
-
-  if (added > 0) {
-    history.sort((a, b) => a.date.localeCompare(b.date));
-    await redis.set(redisKey, history);
-  }
-
-  return added;
-}
-
-async function fetchStraits() {
-  const straitsRes = await fetch('https://straits.live/status');
-  if (!straitsRes.ok) throw new Error(`straits.live ${straitsRes.status}`);
-  return straitsRes.json();
-}
-
-module.exports = async (req, res) => {
-  const startTime = Date.now();
-  const log = [];
-
-  try {
-    const redis = getRedis();
-    const eiaKey = process.env.EIA_API_KEY;
-    const fredKey = process.env.FRED_API_KEY;
-
-    if (!eiaKey || !fredKey) {
-      log.push('ERROR: Missing API keys');
-      return res.status(500).json({ error: 'Missing API keys', log });
-    }
-
-    // ── PHASE 1: Fire ALL external API calls in parallel ──
-    // This is the key fix: instead of waiting for each call sequentially
-    // (~8s × 15 calls = ~120s), we fire them all at once and wait for
-    // the slowest one (~8s total).
-
-    const eiaPromises = EIA_SERIES.map(s =>
-      fetchEIA(s.seriesId, eiaKey)
-        .then(points => ({ status: 'ok', key: s.key, node: s.node, points }))
-        .catch(err => ({ status: 'error', key: s.key, error: err.message }))
-    );
-
-    const fredPromises = FRED_SERIES.map(s =>
-      fetchFRED(s.seriesId, fredKey)
-        .then(points => ({ status: 'ok', key: s.key, node: s.node, points }))
-        .catch(err => ({ status: 'error', key: s.key, error: err.message }))
-    );
-
-    const crackPromises = [
-      fetchFRED('DCOILWTICO', fredKey).catch(() => []),
-      fetchFRED(FRED_CRACK_INPUTS.gasoline.seriesId, fredKey).catch(() => []),
-      fetchFRED(FRED_CRACK_INPUTS.diesel.seriesId, fredKey).catch(() => []),
-    ];
-
-    const straitsPromise = fetchStraits()
-      .then(data => ({ status: 'ok', data }))
-      .catch(err => ({ status: 'error', error: err.message }));
-
-    // Wait for everything at once
-    const [eiaResults, fredResults, crackResults, straitsResult] = await Promise.all([
-      Promise.all(eiaPromises),
-      Promise.all(fredPromises),
-      Promise.all(crackPromises),
-      straitsPromise,
-    ]);
-
-    log.push(`API calls completed in ${Date.now() - startTime}ms`);
-
-    // ── PHASE 2: Process results and write to Redis ──
-
-    // EIA series
-    for (const r of eiaResults) {
-      if (r.status === 'error') {
-        log.push(`[EIA] ${r.key}: ERROR — ${r.error}`);
-        continue;
-      }
-      const redisKey = `series:${r.node}:${r.key}`;
-      const added = await appendToHistory(redis, redisKey, r.points);
-      log.push(`[EIA] ${r.key}: ${r.points.length} fetched, ${added} new`);
-    }
-
-    // FRED series
-    for (const r of fredResults) {
-      if (r.status === 'error') {
-        log.push(`[FRED] ${r.key}: ERROR — ${r.error}`);
-        continue;
-      }
-      const redisKey = `series:${r.node}:${r.key}`;
-      const added = await appendToHistory(redis, redisKey, r.points);
-      log.push(`[FRED] ${r.key}: ${r.points.length} fetched, ${added} new`);
-    }
-
-    // Crack spread calculations
-    try {
-      const [wtiPoints, gasPoints, dieselPoints] = crackResults;
-
-      // If diesel primary is empty, try fallback
-      let dieselFinal = dieselPoints;
-      if (dieselPoints.length === 0 && FRED_CRACK_INPUTS.diesel.fallback) {
-        dieselFinal = await fetchFRED(FRED_CRACK_INPUTS.diesel.fallback, fredKey);
-        log.push('[FRED] diesel: using DHOILNYH fallback');
-      }
-
-      // Gasoline crack: (gasoline $/gal × 42) - WTI $/bbl
-      if (wtiPoints.length > 0 && gasPoints.length > 0) {
-        const latest = gasPoints[gasPoints.length - 1];
-        const wtiMatch = wtiPoints.find(w => w.date === latest.date) || wtiPoints[wtiPoints.length - 1];
-        const crack = (latest.value * 42) - wtiMatch.value;
-        const crackPoint = { value: Math.round(crack * 100) / 100, date: latest.date, source: 'calculated' };
-        const added = await appendToHistory(redis, 'series:n5:gasoline_crack', [crackPoint]);
-        log.push(`[CALC] gasoline_crack: $${crackPoint.value}/bbl (${added} new)`);
-      }
-
-      // Diesel crack: (diesel $/gal × 42) - WTI $/bbl
-      if (wtiPoints.length > 0 && dieselFinal.length > 0) {
-        const latest = dieselFinal[dieselFinal.length - 1];
-        const wtiMatch = wtiPoints.find(w => w.date === latest.date) || wtiPoints[wtiPoints.length - 1];
-        const crack = (latest.value * 42) - wtiMatch.value;
-        const crackPoint = { value: Math.round(crack * 100) / 100, date: latest.date, source: 'calculated' };
-        const added = await appendToHistory(redis, 'series:n5:diesel_crack', [crackPoint]);
-        log.push(`[CALC] diesel_crack: $${crackPoint.value}/bbl (${added} new)`);
-      }
-    } catch (err) {
-      log.push(`[CALC] crack spreads: ERROR — ${err.message}`);
-    }
-
-    // Straits.live processing
-    if (straitsResult.status === 'error') {
-      log.push(`[STRAITS] ERROR — ${straitsResult.error}`);
-    } else {
-      const sl = straitsResult.data;
-      const today = sl.asOf ? sl.asOf.split('T')[0] : new Date().toISOString().split('T')[0];
-
-      // N1 — Pipeline bypass utilisation
-      if (sl.pipelineBypass && Array.isArray(sl.pipelineBypass)) {
-        const petroline = sl.pipelineBypass.find(p => p.id === 'petroline');
-        const adcop = sl.pipelineBypass.find(p => p.id === 'adcop');
-        if (petroline) {
-          const added = await appendToHistory(redis, 'series:n1:petroline_pct', [
-            { value: petroline.currentUtilizationPct, date: today, source: 'straits.live' }
-          ]);
-          log.push(`[STRAITS] petroline_pct: ${petroline.currentUtilizationPct}% (${added} new)`);
-        }
-        if (adcop) {
-          const added = await appendToHistory(redis, 'series:n1:adcop_pct', [
-            { value: adcop.currentUtilizationPct, date: today, source: 'straits.live' }
-          ]);
-          log.push(`[STRAITS] adcop_pct: ${adcop.currentUtilizationPct}% (${added} new)`);
-        }
-      }
-
-      // N2 — Chokepoint transits
-      if (sl.transits) {
-        const transitDate = sl.transits.asOfDate || today;
-        const added = await appendToHistory(redis, 'series:n2:hormuz_portwatch', [
-          { value: sl.transits.count, date: transitDate, source: 'straits.live/PortWatch' }
-        ]);
-        log.push(`[STRAITS] hormuz_portwatch: ${sl.transits.count}/day (${added} new)`);
-      }
-
-      if (sl.aisGaps) {
-        const added = await appendToHistory(redis, 'series:n2:hormuz_dark_ais', [
-          { value: sl.aisGaps.count, date: today, source: 'straits.live/AIS' }
-        ]);
-        log.push(`[STRAITS] hormuz_dark_ais: ${sl.aisGaps.count} (${added} new)`);
-      }
-
-      if (sl.strandedOffshore !== undefined) {
-        const added = await appendToHistory(redis, 'series:n2:stranded_offshore', [
-          { value: sl.strandedOffshore, date: today, source: 'straits.live/AIS' }
-        ]);
-        log.push(`[STRAITS] stranded_offshore: ${sl.strandedOffshore} (${added} new)`);
-      }
-
-      // Chokepoint comparison
-      if (sl.chokepoints && Array.isArray(sl.chokepoints)) {
-        for (const cp of sl.chokepoints) {
-          const cpDate = cp.date || today;
-          let key = null;
-          if (cp.key === 'bab-el-mandeb') key = 'bab_portwatch';
-          if (cp.key === 'suez') key = 'suez_portwatch';
-          if (cp.key === 'cape') key = 'cape_portwatch';
-          if (key) {
-            const added = await appendToHistory(redis, `series:n2:${key}`, [
-              { value: cp.nTotal, date: cpDate, source: 'straits.live/PortWatch' }
-            ]);
-            log.push(`[STRAITS] ${key}: ${cp.nTotal}/day (${added} new)`);
-          }
-        }
-      }
-
-      // N7 — Insurance & risk premium
-      if (sl.insurance) {
-        const insDate = sl.insurance.updatedAt ? sl.insurance.updatedAt.split('T')[0] : today;
-        await appendToHistory(redis, 'series:n7:insurance_multiple', [
-          { value: sl.insurance.multiple, date: insDate, source: 'straits.live' }
-        ]);
-        await appendToHistory(redis, 'series:n7:vlcc_premium_high', [
-          { value: sl.insurance.vlccPremiumHigh, date: insDate, source: 'straits.live' }
-        ]);
-        const clubCount = sl.insurance.withdrawnClubs ? sl.insurance.withdrawnClubs.length : 0;
-        await appendToHistory(redis, 'series:n7:clubs_withdrawn', [
-          { value: clubCount, date: insDate, source: 'straits.live' }
-        ]);
-        log.push(`[STRAITS] insurance: ${sl.insurance.multiple}x, premium $${sl.insurance.vlccPremiumHigh}, ${clubCount} clubs withdrawn`);
-      }
-
-      // N8 — Sanctions / vessel risk
-      if (sl.vesselRisk) {
-        const added = await appendToHistory(redis, 'series:n8:vessels_high_risk', [
-          { value: sl.vesselRisk.high, date: today, source: 'straits.live/AIS+OFAC' }
-        ]);
-        log.push(`[STRAITS] vessels_high_risk: ${sl.vesselRisk.high} (${added} new)`);
-      }
-
-      if (sl.carrierSuspensions && Array.isArray(sl.carrierSuspensions)) {
-        const rerouting = sl.carrierSuspensions.filter(c => c.status === 'rerouting' || c.status === 'suspended').length;
-        const added = await appendToHistory(redis, 'series:n8:carriers_rerouting', [
-          { value: rerouting, date: today, source: 'straits.live' }
-        ]);
-        log.push(`[STRAITS] carriers_rerouting: ${rerouting} of ${sl.carrierSuspensions.length} (${added} new)`);
-      }
-    }
-
-    // Update timestamp
-    const now = new Date().toISOString();
-    await redis.set('meta:last_cron', now);
-    log.push(`Completed in ${Date.now() - startTime}ms`);
-
-    return res.status(200).json({ ok: true, timestamp: now, log });
-  } catch (err) {
-    console.error('Cron error:', err);
-    log.push(`FATAL: ${err.message}`);
-    return res.status(500).json({ error: err.message, log });
-  }
+// Stale thresholds (days) — how old data can be before flagging
+const STALE_THRESHOLDS = {
+  daily: 5,
+  weekly: 14,
+  monthly: 45,
+  quarterly: 120,
+  assessment: 21,
+  as_changed: 60,
 };
+
+module.exports = { NODES, FRED_INPUTS, STALE_THRESHOLDS };
