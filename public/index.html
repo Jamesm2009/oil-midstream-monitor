@@ -793,7 +793,7 @@ function formatValue(value, unit) {
   if (unit === '$/bbl') return '$' + value.toFixed(2);
   if (unit === '$/gal') return '$' + value.toFixed(3);
   if (unit === 'K bbl' || unit === 'K bbl/d') return (value / 1000).toFixed(1) + 'M';
-  if (unit === 'M bbl') return value.toFixed(1) + 'M';
+  if (unit === 'M bbl' || unit === 'M bbl/d') return value.toFixed(1) + 'M';
   if (unit === '/day') return value.toFixed(0);
   return value.toLocaleString();
 }
