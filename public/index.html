@@ -500,6 +500,107 @@ header h1 {
 }
 
 .loading { text-align: center; padding: 4rem; color: var(--text-muted); }
+
+/* Print button */
+.print-btn {
+  font-family: var(--font-data);
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 0.35rem 0.8rem;
+  cursor: pointer;
+  margin-top: 0.4rem;
+}
+.print-btn:hover {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
+/* Print timestamp shown only in print */
+.print-timestamp {
+  display: none;
+}
+
+/* Print styles */
+@media print {
+  /* Hide interactive elements */
+  .print-btn,
+  .input-section,
+  .footer,
+  .info-icon,
+  .login-error,
+  #login-screen { display: none !important; }
+
+  .print-timestamp {
+    display: block;
+    font-family: var(--font-data);
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    margin-bottom: 0.5rem;
+  }
+
+  /* Reset page */
+  body {
+    background: #fff;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .container {
+    max-width: 100%;
+    padding: 0.5rem;
+  }
+
+  /* Single column for consistent layout */
+  .node-grid {
+    grid-template-columns: 1fr !important;
+    gap: 0.6rem;
+  }
+
+  /* Keep cards compact */
+  .node-card {
+    padding: 0.8rem 1rem;
+    break-inside: avoid;
+    page-break-inside: avoid;
+    border: 1px solid #ccc;
+  }
+
+  .node-name { font-size: 1.1rem; }
+  .node-summary { font-size: 0.8rem; margin-bottom: 0.4rem; }
+  .series-row { padding: 0.15rem 0; }
+  .series-label { font-size: 0.82rem; }
+  .series-value { font-size: 0.85rem; }
+  .series-meta { font-size: 0.7rem; }
+
+  /* Hide source panels and sparklines in print */
+  .source-panel { display: none !important; }
+  .sparkline-container { display: none; }
+
+  /* Summary chips */
+  .status-summary {
+    border-bottom: 1px solid #ccc;
+    padding: 0.6rem 0;
+  }
+  .summary-chip {
+    border: 1px solid #ccc;
+    padding: 0.25rem 0.5rem;
+  }
+
+  /* Section labels */
+  .section-label {
+    margin: 1rem 0 0.5rem;
+    font-size: 1.1rem;
+  }
+
+  /* Header */
+  header {
+    border-bottom: 2px solid var(--primary);
+    padding-bottom: 0.5rem;
+    margin-bottom: 1rem;
+  }
+  header h1 { font-size: 1.6rem; }
+}
 </style>
 </head>
 <body>
@@ -518,12 +619,18 @@ header h1 {
 <!-- Dashboard -->
 <div id="dashboard" class="container">
   <header>
-    <h1>Oil Supply Chain Monitor</h1>
-    <div class="meta-line" id="last-updated">Loading...</div>
-    <h4><a>Inspired by article: </a><a class="site-link" href="https://tscsw.substack.com/p/there-is-no-oil-price?" target="_blank">"There is no oil price"↗</a></h4>
+    <div>
+      <h1>Oil Supply Chain Monitor</h1>
+      <h4><a>Inspired by article: </a><a class="site-link" href="https://tscsw.substack.com/p/there-is-no-oil-price?" target="_blank">"There is no oil price"↗</a></h4>
+    </div>
+    <div style="text-align:right;">
+      <div class="meta-line" id="last-updated">Loading...</div>
+      <button class="print-btn" onclick="printDashboard()" title="Save as PDF">⎙ Print</button>
+    </div>
   </header>
 
   <div class="status-summary" id="status-summary"></div>
+  <div class="print-timestamp" id="print-timestamp"></div>
 
   <div class="section-label">Physical Chain</div>
   <div class="node-grid" id="physical-nodes"></div>
@@ -948,6 +1055,14 @@ async function submitOverride() {
     resultEl.textContent = 'Connection error';
     resultEl.className = 'input-result error';
   }
+}
+
+// Print
+function printDashboard() {
+  const ts = document.getElementById('print-timestamp');
+  const now = new Date();
+  ts.textContent = `Printed: ${now.toLocaleDateString()} ${now.toLocaleTimeString()}`;
+  window.print();
 }
 
 // Try auto-login on page load (if cookie exists)
