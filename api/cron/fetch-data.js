@@ -10,14 +10,13 @@ const EIA_SERIES = [
   { key: 'refinery_utilisation', node: 'n4', seriesId: 'PET.WPULEUS3.W', freq: 'weekly' },
   { key: 'us_crude_exports', node: 'n6', seriesId: 'PET.MCREXUS2.M', freq: 'monthly' },
   { key: 'us_crude_exports_wk', node: 'n6', seriesId: 'PET.WCREXUS2.W', freq: 'weekly' },
+  { key: 'us_crude_production', node: 'n6', seriesId: 'PET.WCRFPUS2.W', freq: 'weekly' },
 ];
 
 // FRED daily series
 const FRED_SERIES = [
   { key: 'wti', node: 'n5', seriesId: 'DCOILWTICO' },
   { key: 'brent', node: 'n5', seriesId: 'DCOILBRENTEU' },
-  { key: 'yield_10y', node: 'n5', seriesId: 'DGS10' },
-  { key: 'yield_30y', node: 'n5', seriesId: 'DGS30' },
 ];
 
 // FRED series for crack spread inputs (not stored directly)
