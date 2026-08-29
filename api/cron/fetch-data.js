@@ -25,6 +25,17 @@ const FRED_CRACK_INPUTS = {
   diesel: { seriesId: 'DDFUELNYH', fallback: 'DHOILNYH' },
 };
 
+// IMF PortWatch — direct ArcGIS REST API (public, no key, CC0)
+// Updates weekly on Tuesdays 9 AM ET with ~7 day processing lag
+const PORTWATCH_BASE = 'https://services9.arcgis.com/weJ1QsnbMYJlCHdG/ArcGIS/rest/services/Daily_Chokepoints_Data/FeatureServer/0/query';
+const PORTWATCH_CHOKEPOINTS = {
+  'chokepoint6': { name: 'Hormuz',         total_key: 'hormuz_portwatch', tanker_key: 'hormuz_tanker' },
+  'chokepoint4': { name: 'Bab el-Mandeb',  total_key: 'bab_portwatch',    tanker_key: null },
+  'chokepoint1': { name: 'Suez',           total_key: 'suez_portwatch',   tanker_key: null },
+  'chokepoint7': { name: 'Cape',           total_key: 'cape_portwatch',   tanker_key: null },
+  'chokepoint2': { name: 'Panama',         total_key: 'panama_portwatch', tanker_key: null },
+};
+
 async function fetchEIA(seriesId, apiKey) {
   const url = `https://api.eia.gov/v2/seriesid/${seriesId}?api_key=${apiKey}&length=5&sort[0][column]=period&sort[0][direction]=desc`;
   const res = await fetch(url);
@@ -58,6 +69,48 @@ async function fetchFRED(seriesId, apiKey) {
       .reverse();
   }
   return [];
+}
+
+async function fetchPortWatch() {
+  // Query all 5 chokepoints in one request — last 14 days
+  const ids = Object.keys(PORTWATCH_CHOKEPOINTS).map(id => `'${id}'`).join(',');
+  const since = Date.now() - (14 * 24 * 60 * 60 * 1000);
+  const params = new URLSearchParams({
+    where: `portid IN (${ids}) AND date >= ${since}`,
+    outFields: 'date,portid,n_total,n_tanker',
+    f: 'json',
+    orderByFields: 'date DESC',
+    resultRecordCount: '100',
+  });
+
+  const res = await fetch(`${PORTWATCH_BASE}?${params}`);
+  if (!res.ok) throw new Error(`PortWatch API error: ${res.status}`);
+  const data = await res.json();
+
+  if (!data.features || data.features.length === 0) {
+    throw new Error('PortWatch returned no features');
+  }
+
+  // Group by chokepoint, convert epoch ms → ISO date
+  const byChokepoint = {};
+  for (const f of data.features) {
+    const id = f.attributes.portid;
+    const dateMs = f.attributes.date;
+    const date = new Date(dateMs).toISOString().split('T')[0];
+    if (!byChokepoint[id]) byChokepoint[id] = [];
+    byChokepoint[id].push({
+      date,
+      n_total: f.attributes.n_total,
+      n_tanker: f.attributes.n_tanker,
+    });
+  }
+
+  // Sort each chokepoint's points by date ascending (for appendToHistory)
+  for (const id of Object.keys(byChokepoint)) {
+    byChokepoint[id].sort((a, b) => a.date.localeCompare(b.date));
+  }
+
+  return byChokepoint;
 }
 
 async function appendToHistory(redis, redisKey, newPoints) {
@@ -102,10 +155,6 @@ module.exports = async (req, res) => {
     }
 
     // ── PHASE 1: Fire ALL external API calls in parallel ──
-    // This is the key fix: instead of waiting for each call sequentially
-    // (~8s × 15 calls = ~120s), we fire them all at once and wait for
-    // the slowest one (~8s total).
-
     const eiaPromises = EIA_SERIES.map(s =>
       fetchEIA(s.seriesId, eiaKey)
         .then(points => ({ status: 'ok', key: s.key, node: s.node, points }))
@@ -124,15 +173,20 @@ module.exports = async (req, res) => {
       fetchFRED(FRED_CRACK_INPUTS.diesel.seriesId, fredKey).catch(() => []),
     ];
 
+    const portWatchPromise = fetchPortWatch()
+      .then(data => ({ status: 'ok', data }))
+      .catch(err => ({ status: 'error', error: err.message }));
+
     const straitsPromise = fetchStraits()
       .then(data => ({ status: 'ok', data }))
       .catch(err => ({ status: 'error', error: err.message }));
 
     // Wait for everything at once
-    const [eiaResults, fredResults, crackResults, straitsResult] = await Promise.all([
+    const [eiaResults, fredResults, crackResults, portWatchResult, straitsResult] = await Promise.all([
       Promise.all(eiaPromises),
       Promise.all(fredPromises),
       Promise.all(crackPromises),
+      portWatchPromise,
       straitsPromise,
     ]);
 
@@ -196,7 +250,47 @@ module.exports = async (req, res) => {
       log.push(`[CALC] crack spreads: ERROR — ${err.message}`);
     }
 
-    // Straits.live processing
+    // ── IMF PortWatch processing (N2 chokepoint transits) ──
+    if (portWatchResult.status === 'error') {
+      log.push(`[PORTWATCH] ERROR — ${portWatchResult.error}`);
+    } else {
+      const pwData = portWatchResult.data;
+      let pwTotal = 0;
+
+      for (const [portId, config] of Object.entries(PORTWATCH_CHOKEPOINTS)) {
+        const points = pwData[portId];
+        if (!points || points.length === 0) {
+          log.push(`[PORTWATCH] ${config.name}: no data`);
+          continue;
+        }
+
+        // Store total transits (n_total)
+        const totalPoints = points.map(p => ({
+          value: p.n_total,
+          date: p.date,
+          source: 'IMF PortWatch',
+        }));
+        const totalAdded = await appendToHistory(redis, `series:n2:${config.total_key}`, totalPoints);
+        const latest = points[points.length - 1];
+        log.push(`[PORTWATCH] ${config.name}: ${latest.n_total}/day (${totalAdded} new, latest ${latest.date})`);
+        pwTotal += totalAdded;
+
+        // Store tanker transits if configured (Hormuz only)
+        if (config.tanker_key) {
+          const tankerPoints = points.map(p => ({
+            value: p.n_tanker,
+            date: p.date,
+            source: 'IMF PortWatch',
+          }));
+          const tankerAdded = await appendToHistory(redis, `series:n2:${config.tanker_key}`, tankerPoints);
+          log.push(`[PORTWATCH] ${config.name} tankers: ${latest.n_tanker}/day (${tankerAdded} new)`);
+        }
+      }
+
+      log.push(`[PORTWATCH] Total new points: ${pwTotal}`);
+    }
+
+    // ── Straits.live processing (AIS, pipelines, insurance, sanctions — NOT PortWatch) ──
     if (straitsResult.status === 'error') {
       log.push(`[STRAITS] ERROR — ${straitsResult.error}`);
     } else {
@@ -221,15 +315,7 @@ module.exports = async (req, res) => {
         }
       }
 
-      // N2 — Chokepoint transits
-      if (sl.transits) {
-        const transitDate = sl.transits.asOfDate || today;
-        const added = await appendToHistory(redis, 'series:n2:hormuz_portwatch', [
-          { value: sl.transits.count, date: transitDate, source: 'straits.live/PortWatch' }
-        ]);
-        log.push(`[STRAITS] hormuz_portwatch: ${sl.transits.count}/day (${added} new)`);
-      }
-
+      // N2 — AIS-derived signals only (PortWatch transits now come from direct API above)
       if (sl.aisGaps) {
         const added = await appendToHistory(redis, 'series:n2:hormuz_dark_ais', [
           { value: sl.aisGaps.count, date: today, source: 'straits.live/AIS' }
@@ -242,23 +328,6 @@ module.exports = async (req, res) => {
           { value: sl.strandedOffshore, date: today, source: 'straits.live/AIS' }
         ]);
         log.push(`[STRAITS] stranded_offshore: ${sl.strandedOffshore} (${added} new)`);
-      }
-
-      // Chokepoint comparison
-      if (sl.chokepoints && Array.isArray(sl.chokepoints)) {
-        for (const cp of sl.chokepoints) {
-          const cpDate = cp.date || today;
-          let key = null;
-          if (cp.key === 'bab-el-mandeb') key = 'bab_portwatch';
-          if (cp.key === 'suez') key = 'suez_portwatch';
-          if (cp.key === 'cape') key = 'cape_portwatch';
-          if (key) {
-            const added = await appendToHistory(redis, `series:n2:${key}`, [
-              { value: cp.nTotal, date: cpDate, source: 'straits.live/PortWatch' }
-            ]);
-            log.push(`[STRAITS] ${key}: ${cp.nTotal}/day (${added} new)`);
-          }
-        }
       }
 
       // N7 — Insurance & risk premium
