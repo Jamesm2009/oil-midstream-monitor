@@ -72,29 +72,42 @@ async function fetchFRED(seriesId, apiKey) {
 }
 
 async function fetchPortWatch() {
-  // Query all 5 chokepoints in one request — last 14 days
-  const ids = Object.keys(PORTWATCH_CHOKEPOINTS).map(id => `'${id}'`).join(',');
-  const since = Date.now() - (14 * 24 * 60 * 60 * 1000);
-  const params = new URLSearchParams({
-    where: `portid IN (${ids}) AND date >= ${since}`,
-    outFields: 'date,portid,n_total,n_tanker',
-    f: 'json',
-    orderByFields: 'date DESC',
-    resultRecordCount: '100',
-  });
+  // Fetch latest 200 records across ALL chokepoints (no WHERE filter — avoids
+  // ArcGIS encoding issues with IN clauses). Filter client-side for our 5.
+  const url = PORTWATCH_BASE
+    + '?where=' + encodeURIComponent('1=1')
+    + '&outFields=' + encodeURIComponent('date,portid,n_total,n_tanker')
+    + '&f=json'
+    + '&orderByFields=' + encodeURIComponent('date DESC')
+    + '&resultRecordCount=200';
 
-  const res = await fetch(`${PORTWATCH_BASE}?${params}`);
-  if (!res.ok) throw new Error(`PortWatch API error: ${res.status}`);
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`PortWatch HTTP ${res.status}`);
   const data = await res.json();
 
-  if (!data.features || data.features.length === 0) {
-    throw new Error('PortWatch returned no features');
+  // Diagnostic: surface what the API actually returned
+  if (data.error) {
+    throw new Error(`PortWatch API error: ${JSON.stringify(data.error)}`);
   }
 
-  // Group by chokepoint, convert epoch ms → ISO date
+  if (!data.features) {
+    // Log the top-level keys so we can see the response shape
+    const keys = Object.keys(data).join(', ');
+    throw new Error(`PortWatch unexpected response shape — keys: ${keys}`);
+  }
+
+  if (data.features.length === 0) {
+    throw new Error('PortWatch returned 0 features');
+  }
+
+  // Filter to our 5 chokepoints and group by portid
+  const wanted = new Set(Object.keys(PORTWATCH_CHOKEPOINTS));
   const byChokepoint = {};
+
   for (const f of data.features) {
     const id = f.attributes.portid;
+    if (!wanted.has(id)) continue;
+
     const dateMs = f.attributes.date;
     const date = new Date(dateMs).toISOString().split('T')[0];
     if (!byChokepoint[id]) byChokepoint[id] = [];
@@ -110,7 +123,16 @@ async function fetchPortWatch() {
     byChokepoint[id].sort((a, b) => a.date.localeCompare(b.date));
   }
 
-  return byChokepoint;
+  // Diagnostic: report which chokepoints we found
+  const found = Object.keys(byChokepoint);
+  const missing = [...wanted].filter(id => !byChokepoint[id]);
+  if (found.length === 0) {
+    // Grab a sample portid to show what the API actually contains
+    const sampleIds = data.features.slice(0, 3).map(f => f.attributes.portid);
+    throw new Error(`No matching chokepoints in ${data.features.length} features. Sample portids: ${sampleIds.join(', ')}`);
+  }
+
+  return { byChokepoint, found, missing, totalFeatures: data.features.length };
 }
 
 async function appendToHistory(redis, redisKey, newPoints) {
@@ -254,7 +276,8 @@ module.exports = async (req, res) => {
     if (portWatchResult.status === 'error') {
       log.push(`[PORTWATCH] ERROR — ${portWatchResult.error}`);
     } else {
-      const pwData = portWatchResult.data;
+      const { byChokepoint: pwData, found, missing, totalFeatures } = portWatchResult.data;
+      log.push(`[PORTWATCH] ${totalFeatures} features fetched, ${found.length}/5 chokepoints matched${missing.length ? ', missing: ' + missing.join(', ') : ''}`);
       let pwTotal = 0;
 
       for (const [portId, config] of Object.entries(PORTWATCH_CHOKEPOINTS)) {
