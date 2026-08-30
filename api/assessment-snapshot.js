@@ -27,12 +27,21 @@ const BASELINES = {
 };
 const EPCA_FLOOR = 252.4;
 
-module.exports = async function handler(req, res) {
-  // API key auth
+module.exports = async function handler(req,   // API key auth
   const providedKey = req.query.key;
-  if (!providedKey || providedKey !== process.env.SNAPSHOT_API_KEY) {
-    return res.status(401).json({ error: 'Invalid or missing API key' });
+  const envKey = process.env.SNAPSHOT_API_KEY;
+  if (!providedKey || providedKey !== envKey) {
+    return res.status(401).json({
+      error: 'Invalid or missing API key',
+      debug: {
+        env_defined: !!envKey,
+        env_length: envKey ? envKey.length : 0,
+        provided_length: providedKey ? providedKey.length : 0,
+        match: providedKey === envKey,
+      }
+    });
   }
+
 
   // No cache — always fresh for assessment builds
   res.setHeader('Cache-Control', 'no-store');
