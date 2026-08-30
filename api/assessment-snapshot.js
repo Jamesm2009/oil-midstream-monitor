@@ -123,10 +123,20 @@ var NODES = [
 ];
 
 module.exports = async function handler(req, res) {
-  var providedKey = req.query.key;
-  if (!providedKey || providedKey !== process.env.SNAPSHOT_API_KEY) {
-    return res.status(401).json({ error: 'Invalid or missing API key' });
+    var providedKey = req.query.key;
+  var envKey = process.env.SNAPSHOT_API_KEY;
+  if (!providedKey || providedKey !== envKey) {
+    return res.status(401).json({
+      error: 'Invalid or missing API key',
+      debug: {
+        env_defined: !!envKey,
+        env_length: envKey ? envKey.length : 0,
+        provided_length: providedKey ? providedKey.length : 0,
+        match: providedKey === envKey
+      }
+    });
   }
+
 
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Access-Control-Allow-Origin', '*');
