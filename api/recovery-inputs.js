@@ -1,136 +1,90 @@
-// /api/recovery-inputs.js
-// Public endpoint — feeds the Recovery Gap chart in the Iran briefing
-// Returns 6 current values + derived stress ratios + suggested bottleneck adjustments
-// CDN-cached for 1 hour (data updates once daily at 21:00 UTC cron)
-
 const { getRedis } = require('../lib/redis');
 
-// Pre-war baseline constants (Jan 2026 averages / 2024 norms)
-const BASELINES = {
-  hormuz_daily: 24,          // Jan 2026 avg from Windward/PortWatch
-  bab_daily: 45,             // Jan 2026 avg
-  insurance_multiple: 1.0,   // No war-risk premium = 1× base rate
-  diesel_crack_normal: 25,   // 2024 avg diesel crack spread ($/bbl)
-};
+// Public endpoint — CDN-cached, key optional for authenticated enrichment
+// Returns the 6 values recovery.html needs plus suggested adjustments
 
-const EPCA_FLOOR = 252.4; // Statutory SPR floor (M bbl)
+var EPCA_FLOOR = 252.4;
 
 module.exports = async function handler(req, res) {
-  // Public endpoint — wide CORS + CDN cache
+  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate=600');
+  if (req.method === 'OPTIONS') return res.status(200).end();
 
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
+  // CDN cache: 1 hour, stale-while-revalidate 6 hours
+  res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate=21600');
 
   try {
-    const redis = getRedis();
+    var redis = getRedis();
 
-    // Fetch latest values from each relevant series — all in parallel
-    const [hormuzData, babData, insData, dieselData, sprData, cushingData, lastCron] =
-      await Promise.all([
-        redis.get('series:n2:hormuz_portwatch'),
-        redis.get('series:n2:bab_portwatch'),
-        redis.get('series:n7:insurance_multiple'),
-        redis.get('series:n5:diesel_crack'),
-        redis.get('series:n4:spr_level'),
-        redis.get('series:n4:cushing'),
-        redis.get('meta:last_cron'),
-      ]);
+    // Load the series we need in parallel
+    var keys = [
+      'series:n2:hormuz_portwatch',
+      'series:n2:bab_portwatch',
+      'series:n7:insurance_multiple',
+      'series:n5:diesel_crack',
+      'series:n4:spr_level',
+      'series:n5:wti',
+      'series:n5:brent'
+    ];
 
-    const hormuz = getLatest(hormuzData);
-    const bab = getLatest(babData);
-    const insMult = getLatest(insData);
-    const dieselCrack = getLatest(dieselData);
-    const sprKbbl = getLatest(sprData);
-    const cushingKbbl = getLatest(cushingData);
+    var results = await Promise.all(keys.map(function(k) { return redis.get(k); }));
 
-    // Convert K bbl → M bbl for SPR and Cushing
-    const sprMb = sprKbbl !== null ? round(sprKbbl / 1000, 1) : null;
-    const cushingMb = cushingKbbl !== null ? round(cushingKbbl / 1000, 1) : null;
+    var hormuz = getLatest(results[0]);
+    var bab = getLatest(results[1]);
+    var ins = getLatest(results[2]);
+    var diesel = getLatest(results[3]);
+    var sprK = getLatest(results[4]);
+    var wti = getLatest(results[5]);
+    var brent = getLatest(results[6]);
 
-    const current = {
-      hormuz_daily: hormuz,
-      bab_daily: bab,
-      insurance_multiple: insMult,
-      diesel_crack: dieselCrack,
-      spr_mb: sprMb,
-      cushing_mb: cushingMb,
-    };
+    var sprMb = sprK !== null ? rnd(sprK / 1000, 1) : null;
+    var sprBuf = sprMb !== null ? rnd(sprMb - EPCA_FLOOR, 1) : null;
+    var dcm = diesel !== null ? diesel / 25 : null;
 
-    // Derived stress ratios
-    const derived = {
-      hormuz_recovery_pct: hormuz !== null
-        ? round((hormuz / BASELINES.hormuz_daily) * 100, 1)
-        : null,
-      insurance_stress_ratio: insMult,
-      diesel_crack_multiple: dieselCrack !== null
-        ? round(dieselCrack / BASELINES.diesel_crack_normal, 2)
-        : null,
-      spr_buffer_above_floor_mb: sprMb !== null
-        ? round(sprMb - EPCA_FLOOR, 1)
-        : null,
-    };
+    // Last cron timestamp
+    var lastCron = await redis.get('meta:last_cron');
 
-    // Suggested bottleneck duration adjustments for the Recovery Gap chart
-    const dcm = derived.diesel_crack_multiple;
-    const sprBuf = derived.spr_buffer_above_floor_mb;
-
-    const suggested = {
-      route_status: hormuz === null ? 'unknown'
-        : hormuz < 5 ? 'cape'
-        : hormuz <= 15 ? 'partial'
-        : 'full',
-      insurance_months: insMult === null ? null
-        : insMult > 20 ? 4
-        : insMult > 10 ? 3
-        : insMult > 5 ? 2
-        : 1,
-      refinery_ramp_months: dcm === null ? null
-        : dcm > 3 ? 2
-        : dcm > 2 ? 1.5
-        : dcm > 1 ? 1
-        : 0.5,
-      stocks_rebuild_months: sprBuf === null ? null
-        : sprBuf < 20 ? 4
-        : sprBuf < 40 ? 3
-        : sprBuf < 80 ? 2
-        : 1,
-    };
-
-    // Staleness check — flag if cron hasn't run in >36 hours
-    const cronAge = lastCron
-      ? Date.now() - new Date(lastCron).getTime()
-      : Infinity;
-    const stale = cronAge > 36 * 3600 * 1000;
+    // Staleness check — flag if cron > 48h old
+    var stale = false;
+    if (lastCron) {
+      var ageHours = (Date.now() - new Date(lastCron).getTime()) / 3600000;
+      stale = ageHours > 48;
+    } else {
+      stale = true;
+    }
 
     return res.status(200).json({
-      timestamp: new Date().toISOString(),
-      prewar_baseline: BASELINES,
-      current,
-      derived,
-      suggested_adjustments: suggested,
       last_cron: lastCron || null,
-      stale,
+      stale: stale,
+      current: {
+        hormuz_daily: hormuz,
+        bab_daily: bab,
+        insurance_multiple: ins,
+        diesel_crack: diesel !== null ? rnd(diesel, 2) : null,
+        spr_mb: sprMb,
+        wti: wti !== null ? rnd(wti, 2) : null,
+        brent: brent !== null ? rnd(brent, 2) : null
+      },
+      suggested_adjustments: {
+        route_status: hormuz === null ? 'unknown' : hormuz < 5 ? 'cape' : hormuz <= 15 ? 'partial' : 'full',
+        insurance_months: ins === null ? null : ins > 20 ? 4 : ins > 10 ? 3 : ins > 5 ? 2 : 1,
+        refinery_ramp_months: dcm === null ? null : dcm > 3 ? 2 : dcm > 2 ? 1.5 : dcm > 1 ? 1 : 0.5,
+        stocks_rebuild_months: sprBuf === null ? null : sprBuf < 20 ? 4 : sprBuf < 40 ? 3 : sprBuf < 80 ? 2 : 1
+      }
     });
   } catch (err) {
-    console.error('recovery-inputs error:', err);
-    return res.status(500).json({
-      error: 'Failed to read monitor data',
-      detail: err.message,
-    });
+    return res.status(500).json({ error: 'Failed to build recovery inputs', detail: String(err.message || err) });
   }
 };
 
-// Extract latest value from a Redis series (JSON array of {value, date, source})
 function getLatest(data) {
   if (!data || !Array.isArray(data) || data.length === 0) return null;
-  const latest = data[data.length - 1];
-  return latest.value !== undefined ? latest.value : null;
+  var e = data[data.length - 1];
+  return (e.value !== undefined) ? e.value : null;
 }
 
-function round(n, d) {
+function rnd(n, d) {
   if (n === null || n === undefined || isNaN(n)) return null;
-  return Math.round(n * 10 ** d) / 10 ** d;
+  var f = Math.pow(10, d);
+  return Math.round(n * f) / f;
 }
