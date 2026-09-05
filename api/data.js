@@ -1,7 +1,16 @@
+// api/data.js
+//
+// Changes vs the version behind the 2026-09-05 report:
+//   - staleness is passed INTO scoring instead of being display-only
+//   - scoring returns a rich object; 'unknown' is a first-class status
+//   - manual overrides are flagged loudly, including when they mask a worse
+//     computed status (the likely explanation for N6 printing green)
+//   - a Redis read failure for a series no longer silently becomes []
+
 const { requireAuth } = require('../lib/auth');
 const { getRedis } = require('../lib/redis');
 const { NODES, STALE_THRESHOLDS } = require('../lib/config');
-const { calculateNodeStatus } = require('../lib/thresholds');
+const { calculateNodeStatus, worstStatus, SEVERITY } = require('../lib/thresholds');
 
 module.exports = async (req, res) => {
   if (!requireAuth(req, res)) return;
@@ -9,6 +18,7 @@ module.exports = async (req, res) => {
   try {
     const redis = getRedis();
     const result = { nodes: [], meta: {} };
+    const allStatuses = [];
 
     for (const node of NODES) {
       const nodeData = {
@@ -23,27 +33,32 @@ module.exports = async (req, res) => {
         status: null,
       };
 
-      const latestValues = {};
+      const values = {};
       const histories = {};
+      const staleFlags = {};
 
       for (const s of node.series) {
         const redisKey = `series:${node.id}:${s.key}`;
+
         let history = [];
+        let readError = null;
         try {
-          history = (await redis.get(redisKey)) || [];
-        } catch { }
+          const raw = await redis.get(redisKey);
+          history = Array.isArray(raw) ? raw : [];
+        } catch (err) {
+          // Do not let a transport failure masquerade as an empty series.
+          readError = err.message || String(err);
+        }
 
-        const latest = Array.isArray(history) && history.length > 0
-          ? history[history.length - 1]
-          : null;
+        const latest = history.length > 0 ? history[history.length - 1] : null;
 
-        // Check staleness
         let stale = false;
         if (latest && latest.date) {
-          const ageMs = Date.now() - new Date(latest.date).getTime();
-          const ageDays = ageMs / (1000 * 60 * 60 * 24);
+          const ageDays = (Date.now() - new Date(latest.date).getTime()) / 86400000;
           const threshold = STALE_THRESHOLDS[s.cadence] || 30;
           stale = ageDays > threshold;
+        } else {
+          stale = true; // no dated observation is not fresh
         }
 
         nodeData.series.push({
@@ -52,50 +67,64 @@ module.exports = async (req, res) => {
           unit: s.unit,
           manual: s.manual,
           cadence: s.cadence,
-          latest: latest,
-          stale: stale,
+          latest,
+          stale,
+          readError,
           historyLength: history.length,
         });
 
-        if (latest) {
-          latestValues[s.key] = latest.value;
-        }
+        if (latest) values[s.key] = latest.value;
         histories[s.key] = history;
+        staleFlags[s.key] = stale || Boolean(readError);
       }
 
-      // Calculate auto status
-      latestValues._history = histories;
-      const autoStatus = calculateNodeStatus(node.id, latestValues);
+      const scored = calculateNodeStatus(node.id, { values, histories, stale: staleFlags });
 
-      // Check for manual override
-      let statusObj;
+      let override = null;
       try {
-        statusObj = await redis.get(`status:${node.id}`);
-      } catch { }
+        const statusObj = await redis.get(`status:${node.id}`);
+        if (statusObj && statusObj.override) override = statusObj;
+      } catch { /* override unavailable — computed status stands */ }
 
-      if (statusObj && statusObj.override) {
-        nodeData.status = {
-          current: statusObj.override,
-          auto: autoStatus,
-          override: statusObj.override,
-          updated: statusObj.updated,
-        };
-      } else {
-        nodeData.status = {
-          current: autoStatus,
-          auto: autoStatus,
-          override: null,
-          updated: new Date().toISOString().split('T')[0],
-        };
-      }
+      const current = override ? override.override : scored.status;
 
+      nodeData.status = {
+        current,
+        auto: scored.status,
+        override: override ? override.override : null,
+        overrideUpdated: override ? override.updated : null,
+        // Loud flag: an override that presents a worse computed status as
+        // something calmer. This is the failure mode to check on N6.
+        overrideMasking: Boolean(
+          override && SEVERITY[scored.status] > SEVERITY[override.override]
+        ),
+        reasons: scored.reasons,
+        rejected: scored.rejected,
+        detail: scored.detail,
+        criticalMissing: scored.criticalMissing,
+        degraded: scored.degraded,
+        updated: new Date().toISOString().split('T')[0],
+      };
+
+      allStatuses.push(current);
       result.nodes.push(nodeData);
     }
 
-    // Meta
+    const counts = { red: 0, amber: 0, green: 0, unknown: 0 };
+    for (const s of allStatuses) counts[s] = (counts[s] || 0) + 1;
+
+    result.meta.rollup = {
+      counts,
+      worst: worstStatus(allStatuses),
+      // Surfaced separately so an assessment never reads "6 red 2 green" when
+      // the two greens are actually blind spots.
+      blindNodes: result.nodes.filter(n => n.status.current === 'unknown').map(n => n.id),
+      maskedNodes: result.nodes.filter(n => n.status.overrideMasking).map(n => n.id),
+    };
+
     try {
       result.meta.lastCron = await redis.get('meta:last_cron');
-    } catch { }
+    } catch { result.meta.lastCron = null; }
 
     res.setHeader('Cache-Control', 'no-store');
     return res.status(200).json(result);
