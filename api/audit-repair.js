@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 //
-// scapi/audit-repair.js
+// api/audit-repair.js
 //
 // Walks every stored series, applies the values.js plausibility gate to every
 // point, and reports what is corrupt. With --apply it moves bad points to a
