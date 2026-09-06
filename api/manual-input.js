@@ -1,6 +1,7 @@
 const { requireAuth } = require('../lib/auth');
 const { getRedis } = require('../lib/redis');
 const { NODES } = require('../lib/config');
+const { parseBand, BAND_SERIES } = require('../lib/values');
 
 module.exports = async (req, res) => {
   if (req.method !== 'POST') {
