@@ -33,12 +33,24 @@ module.exports = async (req, res) => {
     let history = (await redis.get(redisKey)) || [];
     if (!Array.isArray(history)) history = [];
 
-    // Parse value — strip commas and whitespace from numeric inputs
+    // Parse value — band-shaped series keep their string form.
+    // parseFloat('3-8') returns 3, not NaN, so the old coercion silently
+    // truncated a war-risk band to its lower edge.
     let parsedValue = value;
     if (typeof value === 'string') {
-      const cleaned = value.replace(/[,\s]/g, '');
-      const num = parseFloat(cleaned);
-      parsedValue = isNaN(num) ? value : num; // keep as string only if not a number (e.g. "text" fields)
+      if (BAND_SERIES.has(series)) {
+        const band = parseBand(value);
+        if (!band) {
+          return res.status(400).json({
+            error: `${series} expects a band such as "3-8", or a single number`,
+          });
+        }
+        parsedValue = value.trim(); // stored verbatim; thresholds.js parses it
+      } else {
+        const cleaned = value.replace(/[,\s]/g, '');
+        const num = parseFloat(cleaned);
+        parsedValue = isNaN(num) ? value : num;
+      }
     }
 
     // Create new data point
