@@ -1,4 +1,24 @@
+// api/assessment-snapshot.js
+//
+// CHANGELOG (Sep 7, 2026):
+// - FAIL-CLOSED BUCKETING. This file predated the Sep 6 scoring rewrite and had
+//   no concept of 'unknown'. Node status was bucketed with
+//   `if red / else if amber / else green`, so a node scoring 'unknown' in
+//   /api/data was published as GREEN here. The default on a missing status
+//   object was also 'green'. Both are corrected: unknown has its own bucket,
+//   and anything unrecognised now degrades to 'unknown', never 'green'.
+// - REASONS SURFACED. thresholds.js returns { status, reasons, rejected,
+//   detail, criticalMissing, degraded }. Only .status was being read. The
+//   briefing can now print why a node is unknown instead of guessing.
+//
+// NOTE: summary.compound_stress may now contain an 'N unknown' term, and
+// summary gains an unknown_nodes array. green_nodes is narrower than before —
+// it no longer silently absorbs unknowns.
+
 const { getRedis } = require('../lib/redis');
+
+// Severity order matches lib/thresholds.js: red > unknown > amber > green.
+var VALID_STATUSES = ['red', 'unknown', 'amber', 'green'];
 
 var STALE_DAYS = {
   daily: 5,
@@ -192,13 +212,17 @@ module.exports = async function handler(req, res) {
     var redNodes = [];
     var amberNodes = [];
     var greenNodes = [];
+    var unknownNodes = [];
 
     for (var i = 0; i < NODES.length; i++) {
       var nd = NODES[i];
       var nid = nd.id;
       var nkey = nid.toUpperCase();
       var statusObj = statusMap[nid];
-      var status = (statusObj && statusObj.status) ? statusObj.status : 'green';
+      var rawStatus = (statusObj && typeof statusObj.status === 'string') ? statusObj.status : null;
+      // Fail closed. A missing status key, a null read, or any value we do not
+      // recognise is 'unknown'. It is never 'green'.
+      var status = (rawStatus !== null && VALID_STATUSES.indexOf(rawStatus) !== -1) ? rawStatus : 'unknown';
       var override = (statusObj && statusObj.override) ? statusObj.override : null;
 
       var automated = {};
@@ -250,6 +274,12 @@ module.exports = async function handler(req, res) {
         name: nd.name,
         status: status,
         status_override: override,
+        // Why the scorer landed where it did. Empty arrays when the stored
+        // status object predates the Sep 6 rewrite.
+        status_reasons: (statusObj && Array.isArray(statusObj.reasons)) ? statusObj.reasons : [],
+        rejected_inputs: (statusObj && Array.isArray(statusObj.rejected)) ? statusObj.rejected : [],
+        critical_missing: (statusObj && Array.isArray(statusObj.criticalMissing)) ? statusObj.criticalMissing : [],
+        degraded: (statusObj && statusObj.degraded === true) || status === 'unknown',
         automated_metrics: automated,
         manual_metrics: manual,
         stale_series: staleSeries,
@@ -257,6 +287,7 @@ module.exports = async function handler(req, res) {
       };
 
       if (status === 'red') redNodes.push(nkey);
+      else if (status === 'unknown') unknownNodes.push(nkey);
       else if (status === 'amber') amberNodes.push(nkey);
       else greenNodes.push(nkey);
     }
@@ -264,11 +295,16 @@ module.exports = async function handler(req, res) {
     // Summary
     var parts = [];
     if (redNodes.length > 0) parts.push(redNodes.length + ' red');
+    if (unknownNodes.length > 0) parts.push(unknownNodes.length + ' unknown');
     if (amberNodes.length > 0) parts.push(amberNodes.length + ' amber');
     if (greenNodes.length > 0) parts.push(greenNodes.length + ' green');
     var label = parts.join(' + ');
     if (redNodes.length >= 4) label += ' — systemic stress pattern';
     else if (redNodes.length >= 2) label += ' — elevated stress';
+    // An unknown is an unmeasured node, not a quiet one. Say so, because the
+    // reds and greens either side of it are a partial picture.
+    if (unknownNodes.length >= 3) label += ' — coverage degraded, greens not load-bearing';
+    else if (unknownNodes.length > 0) label += ' — ' + unknownNodes.length + ' node(s) unmeasured';
 
     // Stale summary
     var totalStale = 0;
@@ -294,10 +330,14 @@ module.exports = async function handler(req, res) {
       timestamp: now.toISOString(),
       last_cron: lastCron || null,
       cron_age_hours: cronAge,
+      snapshot_schema: 'fail_closed_v2',
       summary: {
         red_nodes: redNodes,
+        unknown_nodes: unknownNodes,
         amber_nodes: amberNodes,
         green_nodes: greenNodes,
+        nodes_scored: redNodes.length + amberNodes.length + greenNodes.length,
+        nodes_total: NODES.length,
         compound_stress: label
       },
       nodes: nodes,
