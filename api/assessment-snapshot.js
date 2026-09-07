@@ -1,34 +1,34 @@
 // api/assessment-snapshot.js
 //
 // CHANGELOG (Sep 7, 2026):
-// - FAIL-CLOSED BUCKETING. This file predated the Sep 6 scoring rewrite and had
-//   no concept of 'unknown'. Node status was bucketed with
-//   `if red / else if amber / else green`, so a node scoring 'unknown' in
-//   /api/data was published as GREEN here. The default on a missing status
-//   object was also 'green'. Both are corrected: unknown has its own bucket,
-//   and anything unrecognised now degrades to 'unknown', never 'green'.
-// - REASONS SURFACED. thresholds.js returns { status, reasons, rejected,
-//   detail, criticalMissing, degraded }. Only .status was being read. The
-//   briefing can now print why a node is unknown instead of guessing.
+// - SCORES ITS OWN NODES. This route used to read a `status` field from
+//   redis key `status:<node>`. Nothing has ever written that field:
+//   api/status-override.js writes only { override, updated }, and api/data.js
+//   computes status live without persisting it. So `statusObj.status` was
+//   always undefined and the old default published GREEN for all eight nodes
+//   on every request, regardless of the data. It now calls
+//   calculateNodeStatus() over the same series it already loads, exactly as
+//   api/data.js does, so the two routes cannot disagree.
+// - `status:<node>` is still read, but only for the manual override.
+// - OVERRIDE MASKING SURFACED, matching api/data.js: an override that presents
+//   a worse computed status as something calmer is flagged, not hidden.
+// - FAIL-CLOSED BUCKETING. 'unknown' has its own bucket and its own summary
+//   array. Anything unrecognised degrades to 'unknown', never 'green'.
+// - DUPLICATE CONFIG REMOVED. This file carried its own copy of NODES and its
+//   own STALE_DAYS map, both of which had to be edited in lockstep with
+//   lib/config.js. Both now come from lib/config.js.
 //
-// NOTE: summary.compound_stress may now contain an 'N unknown' term, and
-// summary gains an unknown_nodes array. green_nodes is narrower than before —
-// it no longer silently absorbs unknowns.
+// NOTE: summary.green_nodes is narrower than before — it no longer absorbs
+// unknowns. summary gains unknown_nodes, masked_nodes, worst and
+// snapshot_schema. Node blocks gain status_auto, status_reasons,
+// rejected_inputs, critical_missing, degraded and override_masking.
 
 const { getRedis } = require('../lib/redis');
+const { NODES, STALE_THRESHOLDS } = require('../lib/config');
+const { calculateNodeStatus, worstStatus, SEVERITY } = require('../lib/thresholds');
 
 // Severity order matches lib/thresholds.js: red > unknown > amber > green.
 var VALID_STATUSES = ['red', 'unknown', 'amber', 'green'];
-
-var STALE_DAYS = {
-  daily: 5,
-  portwatch: 10,
-  weekly: 14,
-  monthly: 45,
-  quarterly: 120,
-  assessment: 21,
-  as_changed: 60
-};
 
 var SCORING_KEYS = [
   'floating_storage_world', 'floating_storage_mideast',
@@ -40,107 +40,6 @@ var SKIP_CADENCES = ['as_changed'];
 
 var EPCA_FLOOR = 252.4;
 
-var BASELINES = {
-  hormuz_daily: 24,
-  bab_daily: 45,
-  insurance_multiple: 1.0,
-  diesel_crack_normal: 25
-};
-
-var NODES = [
-  {
-    id: 'n1', name: 'Gulf Production & Bypass',
-    redThreshold: 'Red: both pipelines at capacity',
-    series: [
-      { key: 'petroline_pct', unit: '%', manual: false, cadence: 'weekly', source: 'straits.live' },
-      { key: 'adcop_pct', unit: '%', manual: false, cadence: 'weekly', source: 'straits.live' },
-      { key: 'gulf_exports', unit: 'M bbl/d', manual: true, cadence: 'monthly' },
-      { key: 'fujairah_yanbu_split', unit: '%', manual: true, cadence: 'assessment' }
-    ]
-  },
-  {
-    id: 'n2', name: 'Chokepoint Transit',
-    redThreshold: 'Red: Hormuz PortWatch <=15/day',
-    series: [
-      { key: 'hormuz_portwatch', unit: '/day', manual: false, cadence: 'portwatch', source: 'IMF PortWatch' },
-      { key: 'hormuz_tanker', unit: '/day', manual: false, cadence: 'portwatch', source: 'IMF PortWatch' },
-      { key: 'hormuz_dark_ais', unit: 'vessels', manual: false, cadence: 'daily', source: 'straits.live' },
-      { key: 'stranded_offshore', unit: 'vessels', manual: false, cadence: 'daily', source: 'straits.live' },
-      { key: 'bab_portwatch', unit: '/day', manual: false, cadence: 'portwatch', source: 'IMF PortWatch' },
-      { key: 'suez_portwatch', unit: '/day', manual: false, cadence: 'portwatch', source: 'IMF PortWatch' },
-      { key: 'cape_portwatch', unit: '/day', manual: false, cadence: 'portwatch', source: 'IMF PortWatch' },
-      { key: 'panama_portwatch', unit: '/day', manual: false, cadence: 'portwatch', source: 'IMF PortWatch' }
-    ]
-  },
-  {
-    id: 'n3', name: 'Tanker Availability',
-    redThreshold: 'Red: world floating storage >140,000 K bbl',
-    series: [
-      { key: 'floating_storage_world', unit: 'K bbl', manual: true, cadence: 'weekly' },
-      { key: 'floating_storage_mideast', unit: 'K bbl', manual: true, cadence: 'weekly' },
-      { key: 'vlcc_spot', unit: '$/day', manual: true, cadence: 'weekly' },
-      { key: 'shadow_fleet_share', unit: '%', manual: true, cadence: 'monthly' }
-    ]
-  },
-  {
-    id: 'n4', name: 'Storage Buffers',
-    redThreshold: 'Red: SPR draw >4M/wk or Cushing <18M bbl',
-    series: [
-      { key: 'spr_level', unit: 'K bbl', manual: false, cadence: 'weekly', source: 'EIA' },
-      { key: 'cushing', unit: 'K bbl', manual: false, cadence: 'weekly', source: 'EIA' },
-      { key: 'commercial_crude', unit: 'K bbl', manual: false, cadence: 'weekly', source: 'EIA' },
-      { key: 'gasoline_stocks', unit: 'K bbl', manual: false, cadence: 'weekly', source: 'EIA' },
-      { key: 'distillate_stocks', unit: 'K bbl', manual: false, cadence: 'weekly', source: 'EIA' },
-      { key: 'refinery_utilisation', unit: '%', manual: false, cadence: 'weekly', source: 'EIA' }
-    ]
-  },
-  {
-    id: 'n5', name: 'Refining & Products',
-    redThreshold: 'Red: diesel crack >$40/bbl',
-    series: [
-      { key: 'wti', unit: '$/bbl', manual: false, cadence: 'daily', source: 'FRED' },
-      { key: 'brent', unit: '$/bbl', manual: false, cadence: 'daily', source: 'FRED' },
-      { key: 'gasoline_crack', unit: '$/bbl', manual: false, cadence: 'daily', source: 'calculated' },
-      { key: 'diesel_crack', unit: '$/bbl', manual: false, cadence: 'daily', source: 'calculated' }
-    ]
-  },
-  {
-    id: 'n6', name: 'Alternative Supply Routes',
-    redThreshold: 'Red: West African differentials >$8/bbl',
-    series: [
-      { key: 'us_crude_production', unit: 'K bbl/d', manual: false, cadence: 'weekly', source: 'EIA' },
-      { key: 'us_crude_exports', unit: 'K bbl/d', manual: false, cadence: 'monthly', source: 'EIA' },
-      { key: 'us_crude_exports_wk', unit: 'K bbl/d', manual: false, cadence: 'weekly', source: 'EIA' },
-      { key: 'us_oil_rig_count', unit: 'rigs', manual: true, cadence: 'weekly' },
-      { key: 'brazil_exports', unit: 'M bbl/d', manual: true, cadence: 'quarterly' },
-      { key: 'guyana_production', unit: 'K bbl/d', manual: true, cadence: 'quarterly' },
-      { key: 'west_africa_diff', unit: '$/bbl', manual: true, cadence: 'weekly' }
-    ]
-  },
-  {
-    id: 'n7', name: 'Insurance & Risk Premium',
-    redThreshold: 'Red: insurance multiple >=20x or >=4 clubs withdrawn',
-    series: [
-      { key: 'insurance_multiple', unit: 'x', manual: false, cadence: 'weekly', source: 'straits.live' },
-      { key: 'vlcc_premium_high', unit: '$', manual: false, cadence: 'weekly', source: 'straits.live' },
-      { key: 'clubs_withdrawn', unit: 'count', manual: false, cadence: 'weekly', source: 'straits.live' },
-      { key: 'warrisk_band', unit: '% hull', manual: true, cadence: 'weekly' },
-      { key: 'jwc_areas', unit: 'text', manual: true, cadence: 'as_changed' }
-    ]
-  },
-  {
-    id: 'n8', name: 'Sanctions Architecture',
-    redThreshold: 'Red: >=7 carriers rerouting',
-    series: [
-      { key: 'vessels_high_risk', unit: 'count', manual: false, cadence: 'daily', source: 'straits.live' },
-      { key: 'carriers_rerouting', unit: 'count', manual: false, cadence: 'weekly', source: 'straits.live' },
-      { key: 'price_cap', unit: '$/bbl', manual: true, cadence: 'as_changed' },
-      { key: 'shadow_designations', unit: 'cumulative', manual: true, cadence: 'monthly' },
-      { key: 'ofac_waivers', unit: 'text', manual: true, cadence: 'as_changed' },
-      { key: 'g7_carriage_share', unit: '%', manual: true, cadence: 'monthly' }
-    ]
-  }
-];
 
 module.exports = async function handler(req, res) {
       var providedKey = req.query.key;
@@ -191,7 +90,10 @@ module.exports = async function handler(req, res) {
     var seriesResults = await Promise.all(
       seriesRequests.map(function(s) {
         return redis.get(s.redisKey).then(function(data) {
-          return { nodeId: s.nodeId, key: s.key, unit: s.unit, manual: s.manual, cadence: s.cadence, source: s.source, data: data };
+          return { nodeId: s.nodeId, key: s.key, unit: s.unit, manual: s.manual, cadence: s.cadence, source: s.source, data: data, readError: null };
+        }).catch(function(err) {
+          // Do not let a transport failure masquerade as an empty series.
+          return { nodeId: s.nodeId, key: s.key, unit: s.unit, manual: s.manual, cadence: s.cadence, source: s.source, data: null, readError: err.message || String(err) };
         });
       })
     );
@@ -213,22 +115,23 @@ module.exports = async function handler(req, res) {
     var amberNodes = [];
     var greenNodes = [];
     var unknownNodes = [];
+    var maskedNodes = [];
+    var allStatuses = [];
 
     for (var i = 0; i < NODES.length; i++) {
       var nd = NODES[i];
       var nid = nd.id;
       var nkey = nid.toUpperCase();
-      var statusObj = statusMap[nid];
-      var rawStatus = (statusObj && typeof statusObj.status === 'string') ? statusObj.status : null;
-      // Fail closed. A missing status key, a null read, or any value we do not
-      // recognise is 'unknown'. It is never 'green'.
-      var status = (rawStatus !== null && VALID_STATUSES.indexOf(rawStatus) !== -1) ? rawStatus : 'unknown';
-      var override = (statusObj && statusObj.override) ? statusObj.override : null;
 
       var automated = {};
       var manual = {};
       var staleSeries = [];
       var nodeSeries = seriesByNode[nid] || {};
+
+      // Scoring context, built exactly as api/data.js builds it.
+      var vals = {};
+      var hists = {};
+      var staleFlags = {};
 
       var keys = Object.keys(nodeSeries);
       for (var ki = 0; ki < keys.length; ki++) {
@@ -238,6 +141,12 @@ module.exports = async function handler(req, res) {
         var latestDate = getLatestDate(sd.data);
         var isStale = checkStale(latestDate, sd.cadence, now);
         var converted = convertUnits(latest, sd.unit);
+
+        // Raw values go to the scorer. convertUnits() is display only — the
+        // thresholds and the values.js bounds are in the config unit.
+        if (latest !== null) vals[sk] = latest;
+        hists[sk] = Array.isArray(sd.data) ? sd.data : [];
+        staleFlags[sk] = isStale || Boolean(sd.readError);
 
         if (sd.manual) {
           manual[sk] = {
@@ -252,7 +161,8 @@ module.exports = async function handler(req, res) {
             value: converted.val,
             unit: converted.unit,
             date: latestDate || 'unknown',
-            source: sd.source
+            source: sd.source,
+            read_error: sd.readError || null
           };
         }
 
@@ -270,25 +180,56 @@ module.exports = async function handler(req, res) {
         allStale[nkey] = staleSeries;
       }
 
+      // Same scorer, same inputs as /api/data. The two routes cannot disagree.
+      var scored;
+      try {
+        scored = calculateNodeStatus(nid, { values: vals, histories: hists, stale: staleFlags });
+      } catch (scoreErr) {
+        scored = {
+          status: 'unknown',
+          reasons: ['snapshot scoring error: ' + (scoreErr.message || String(scoreErr))],
+          rejected: [], detail: {}, criticalMissing: [], degraded: true
+        };
+      }
+
+      // status:<node> is read for the manual override only. It carries no
+      // computed status and never has.
+      var statusObj = statusMap[nid];
+      var overrideObj = (statusObj && statusObj.override) ? statusObj : null;
+      var override = overrideObj ? overrideObj.override : null;
+
+      var current = override !== null ? override : scored.status;
+      // Fail closed: anything unrecognised is 'unknown', never 'green'.
+      if (VALID_STATUSES.indexOf(current) === -1) current = 'unknown';
+
+      var masking = Boolean(
+        overrideObj && SEVERITY[scored.status] > SEVERITY[overrideObj.override]
+      );
+      if (masking) maskedNodes.push(nkey);
+
       nodes[nkey] = {
         name: nd.name,
-        status: status,
+        status: current,
+        status_auto: scored.status,
         status_override: override,
-        // Why the scorer landed where it did. Empty arrays when the stored
-        // status object predates the Sep 6 rewrite.
-        status_reasons: (statusObj && Array.isArray(statusObj.reasons)) ? statusObj.reasons : [],
-        rejected_inputs: (statusObj && Array.isArray(statusObj.rejected)) ? statusObj.rejected : [],
-        critical_missing: (statusObj && Array.isArray(statusObj.criticalMissing)) ? statusObj.criticalMissing : [],
-        degraded: (statusObj && statusObj.degraded === true) || status === 'unknown',
+        override_updated: overrideObj ? (overrideObj.updated || null) : null,
+        override_masking: masking,
+        status_reasons: scored.reasons || [],
+        rejected_inputs: scored.rejected || [],
+        critical_missing: scored.criticalMissing || [],
+        status_detail: scored.detail || {},
+        degraded: Boolean(scored.degraded) || current === 'unknown',
         automated_metrics: automated,
         manual_metrics: manual,
         stale_series: staleSeries,
-        status_logic: nd.redThreshold
+        status_logic: nd.thresholdInfo || []
       };
 
-      if (status === 'red') redNodes.push(nkey);
-      else if (status === 'unknown') unknownNodes.push(nkey);
-      else if (status === 'amber') amberNodes.push(nkey);
+      allStatuses.push(current);
+
+      if (current === 'red') redNodes.push(nkey);
+      else if (current === 'unknown') unknownNodes.push(nkey);
+      else if (current === 'amber') amberNodes.push(nkey);
       else greenNodes.push(nkey);
     }
 
@@ -301,10 +242,10 @@ module.exports = async function handler(req, res) {
     var label = parts.join(' + ');
     if (redNodes.length >= 4) label += ' — systemic stress pattern';
     else if (redNodes.length >= 2) label += ' — elevated stress';
-    // An unknown is an unmeasured node, not a quiet one. Say so, because the
-    // reds and greens either side of it are a partial picture.
+    // An unknown is an unmeasured node, not a quiet one.
     if (unknownNodes.length >= 3) label += ' — coverage degraded, greens not load-bearing';
     else if (unknownNodes.length > 0) label += ' — ' + unknownNodes.length + ' node(s) unmeasured';
+    if (maskedNodes.length > 0) label += ' — ' + maskedNodes.length + ' node(s) masked by override';
 
     // Stale summary
     var totalStale = 0;
@@ -330,12 +271,14 @@ module.exports = async function handler(req, res) {
       timestamp: now.toISOString(),
       last_cron: lastCron || null,
       cron_age_hours: cronAge,
-      snapshot_schema: 'fail_closed_v2',
+      snapshot_schema: 'fail_closed_v3',
       summary: {
         red_nodes: redNodes,
         unknown_nodes: unknownNodes,
         amber_nodes: amberNodes,
         green_nodes: greenNodes,
+        masked_nodes: maskedNodes,
+        worst: worstStatus(allStatuses),
         nodes_scored: redNodes.length + amberNodes.length + greenNodes.length,
         nodes_total: NODES.length,
         compound_stress: label
@@ -369,8 +312,9 @@ function getLatestDate(data) {
 
 function checkStale(dateStr, cadence, now) {
   if (!dateStr) return true;
-  var threshold = STALE_DAYS[cadence];
-  if (!threshold) return false;
+  // Mirrors api/data.js. An unrecognised cadence falls back to 30 days rather
+  // than being treated as permanently fresh.
+  var threshold = STALE_THRESHOLDS[cadence] || 30;
   var age = (now.getTime() - new Date(dateStr).getTime()) / 86400000;
   return age > threshold;
 }
