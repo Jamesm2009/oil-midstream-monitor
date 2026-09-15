@@ -227,6 +227,27 @@ function point(value, date, source, meta, curated) {
   return p;
 }
 
+
+// Decide the date a straits point is filed under.
+//
+// straits' own dataHealth verdict drives this, not a list maintained here:
+//   source "live"  → the reading is current; file under today as before.
+//   otherwise      → curated. File under the upstream vintage, so a value that
+//                    has not moved since August stops looking like today's.
+//
+// When a curated field offers no vintage at all, the point is NOT written.
+// Writing it under today would restate exactly the lie this change removes, and
+// a series that stops growing goes stale on its own, which is the fail-closed
+// outcome. Every skip is logged.
+function resolveDate(meta, today, isCurated) {
+  if (!isCurated) return { date: today, basis: 'live' };
+  const v = meta && meta.vintage;
+  if (typeof v === 'string' && v.length > 0) {
+    return { date: String(v).split('T')[0], basis: meta.vintage_field || 'vintage' };
+  }
+  return { date: null, basis: 'no vintage' };
+}
+
 function isNum(v) {
   return typeof v === 'number' && Number.isFinite(v);
 }
@@ -431,27 +452,40 @@ module.exports = async (req, res) => {
       // from a partially flowing one, and no threshold here can recover that.
       if (sl.pipelineBypass && Array.isArray(sl.pipelineBypass)) {
         const pipeMeta = pickVintage(sl, sl.pipelineBypass, 'pipelines');
+        const pipeCurated = pipeMeta.health !== 'live';
         const petroline = sl.pipelineBypass.find(p => p.id === 'petroline');
         const adcop = sl.pipelineBypass.find(p => p.id === 'adcop');
 
         // Guard the FIELD, not just the object. The old `if (petroline)` check
         // wrote {value: undefined} whenever straits dropped the percentage.
         if (petroline && isNum(petroline.currentUtilizationPct)) {
-          const m = pickVintage(sl, petroline, 'pipelines');
-          const added = await appendToHistory(redis, 'series:n1:petroline_pct', [
-            point(petroline.currentUtilizationPct, today, 'straits.live', m.vintage ? m : pipeMeta, true)
-          ]);
-          log.push(`[STRAITS] petroline_pct: ${petroline.currentUtilizationPct}% (${added} new, vintage ${(m.vintage || pipeMeta.vintage) || 'UNKNOWN'})`);
+          const m0 = pickVintage(sl, petroline, 'pipelines');
+          const m = m0.vintage ? m0 : pipeMeta;
+          const d = resolveDate(m, today, pipeCurated);
+          if (d.date === null) {
+            log.push(`[STRAITS] petroline_pct: NOT WRITTEN — curated with no upstream vintage. Value seen: ${petroline.currentUtilizationPct}%. Series will go stale, which is correct.`);
+          } else {
+            const added = await appendToHistory(redis, 'series:n1:petroline_pct', [
+              point(petroline.currentUtilizationPct, d.date, 'straits.live', m, pipeCurated)
+            ]);
+            log.push(`[STRAITS] petroline_pct: ${petroline.currentUtilizationPct}% filed ${d.date} via ${d.basis} (${added} new)`);
+          }
         } else if (petroline) {
           log.push(`[STRAITS] petroline_pct: SKIPPED — currentUtilizationPct not numeric (${JSON.stringify(petroline.currentUtilizationPct)})`);
         }
 
         if (adcop && isNum(adcop.currentUtilizationPct)) {
-          const m = pickVintage(sl, adcop, 'pipelines');
-          const added = await appendToHistory(redis, 'series:n1:adcop_pct', [
-            point(adcop.currentUtilizationPct, today, 'straits.live', m.vintage ? m : pipeMeta, true)
-          ]);
-          log.push(`[STRAITS] adcop_pct: ${adcop.currentUtilizationPct}% (${added} new, vintage ${(m.vintage || pipeMeta.vintage) || 'UNKNOWN'})`);
+          const m0 = pickVintage(sl, adcop, 'pipelines');
+          const m = m0.vintage ? m0 : pipeMeta;
+          const d = resolveDate(m, today, pipeCurated);
+          if (d.date === null) {
+            log.push(`[STRAITS] adcop_pct: NOT WRITTEN — curated with no upstream vintage. Value seen: ${adcop.currentUtilizationPct}%.`);
+          } else {
+            const added = await appendToHistory(redis, 'series:n1:adcop_pct', [
+              point(adcop.currentUtilizationPct, d.date, 'straits.live', m, pipeCurated)
+            ]);
+            log.push(`[STRAITS] adcop_pct: ${adcop.currentUtilizationPct}% filed ${d.date} via ${d.basis} (${added} new)`);
+          }
         } else if (adcop) {
           log.push(`[STRAITS] adcop_pct: SKIPPED — currentUtilizationPct not numeric (${JSON.stringify(adcop.currentUtilizationPct)})`);
         }
@@ -492,22 +526,27 @@ module.exports = async (req, res) => {
       // not a second dashboard agreeing with anything.
       if (sl.insurance) {
         const m = pickVintage(sl, sl.insurance, 'insurance');
-        const insDate = sl.insurance.updatedAt ? sl.insurance.updatedAt.split('T')[0] : today;
-        if (isNum(sl.insurance.multiple)) {
-          await appendToHistory(redis, 'series:n7:insurance_multiple', [
-            point(sl.insurance.multiple, insDate, 'straits.live estimate', m, true)
+        const insCurated = m.health !== 'live';
+        const d = resolveDate(m, today, insCurated);
+        if (d.date === null) {
+          log.push(`[STRAITS] insurance: NOT WRITTEN — curated with no upstream vintage. Seen: ${sl.insurance.multiple}x, $${sl.insurance.vlccPremiumHigh}. N7 will degrade to unknown as the series ages out, which is the intended behaviour.`);
+        } else {
+          const clubCount = Array.isArray(sl.insurance.withdrawnClubs) ? sl.insurance.withdrawnClubs.length : 0;
+          if (isNum(sl.insurance.multiple)) {
+            await appendToHistory(redis, 'series:n7:insurance_multiple', [
+              point(sl.insurance.multiple, d.date, 'straits.live estimate', m, insCurated)
+            ]);
+          }
+          if (isNum(sl.insurance.vlccPremiumHigh)) {
+            await appendToHistory(redis, 'series:n7:vlcc_premium_high', [
+              point(sl.insurance.vlccPremiumHigh, d.date, 'straits.live estimate', m, insCurated)
+            ]);
+          }
+          await appendToHistory(redis, 'series:n7:clubs_withdrawn', [
+            point(clubCount, d.date, 'straits.live estimate', m, insCurated)
           ]);
+          log.push(`[STRAITS] insurance: ${sl.insurance.multiple}x, premium $${sl.insurance.vlccPremiumHigh}, ${clubCount} clubs filed ${d.date} via ${d.basis}`);
         }
-        if (isNum(sl.insurance.vlccPremiumHigh)) {
-          await appendToHistory(redis, 'series:n7:vlcc_premium_high', [
-            point(sl.insurance.vlccPremiumHigh, insDate, 'straits.live estimate', m, true)
-          ]);
-        }
-        const clubCount = Array.isArray(sl.insurance.withdrawnClubs) ? sl.insurance.withdrawnClubs.length : 0;
-        await appendToHistory(redis, 'series:n7:clubs_withdrawn', [
-          point(clubCount, insDate, 'straits.live estimate', m, true)
-        ]);
-        log.push(`[STRAITS] insurance: ${sl.insurance.multiple}x, premium $${sl.insurance.vlccPremiumHigh}, ${clubCount} clubs — vintage ${m.vintage || 'UNKNOWN'} via ${m.vintage_field || 'none'}`);
         if (Array.isArray(sl.insurance.withdrawnClubs)) {
           log.push(`[STRAITS] clubs named: ${sl.insurance.withdrawnClubs.join(', ')}`);
         }
@@ -566,10 +605,16 @@ module.exports = async (req, res) => {
           vintage_field: newestAuthored ? 'newest authoredAt' : cm.vintage_field,
           health: cm.health,
         };
-        const added = await appendToHistory(redis, 'series:n8:carriers_rerouting', [
-          point(byStatus, today, 'straits.live (curated)', meta, true)
-        ]);
-        log.push(`[STRAITS] carriers_rerouting: ${byStatus} of ${sl.carrierSuspensions.length} by status (${added} new)`);
+        const carrierCurated = cm.health !== 'live';
+        const d = resolveDate(meta, today, carrierCurated);
+        if (d.date === null) {
+          log.push(`[STRAITS] carriers_rerouting: NOT WRITTEN — curated with no authoredAt and no vintage. Seen: ${byStatus} of ${sl.carrierSuspensions.length}.`);
+        } else {
+          const added = await appendToHistory(redis, 'series:n8:carriers_rerouting', [
+            point(byStatus, d.date, 'straits.live (curated)', meta, carrierCurated)
+          ]);
+          log.push(`[STRAITS] carriers_rerouting: ${byStatus} of ${sl.carrierSuspensions.length} by status, filed ${d.date} via ${d.basis} (${added} new)`);
+        }
         log.push(`[STRAITS] carriers by hormuzPosture=stopped: ${byPosture} — straits' own closed-verdict basis. Differs from stored value: ${byPosture !== byStatus}`);
         log.push(`[STRAITS] carriers newest authoredAt: ${newestAuthored || 'ABSENT'}`);
       }
