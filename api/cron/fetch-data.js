@@ -162,6 +162,102 @@ async function fetchStraits() {
   return straitsRes.json();
 }
 
+// /api/v1/jwc — Lloyd's Joint War Committee listed areas. Re-checked every
+// 6 hours upstream. Per straits' own docs: updatedAt restamps on every check,
+// lastChangedAt moves only when the circular itself changes. That is exactly
+// the distinction the Monitor needs everywhere, and this endpoint is the only
+// one that hands it over directly.
+async function fetchJWC() {
+  const r = await fetch('https://straits.live/api/v1/jwc');
+  if (!r.ok) throw new Error(`straits jwc ${r.status}`);
+  return r.json();
+}
+
+// ── Upstream vintage ────────────────────────────────────────────────────────
+//
+// straits publishes a per-section freshness signal, but the exact shape is not
+// pinned down in their docs — the conventions note says to read "each section's
+// verifiedAt" while the /status sample shows a top-level dataHealth map. So
+// probe the plausible locations rather than assume one, and record which one
+// answered. logStraitsShape() below prints what was actually found so this can
+// be tightened to the real field next cycle.
+//
+// NOTE ON DATES. This records vintage ALONGSIDE the value; it does not change
+// the date a point is filed under. Dating a curated field by its true vintage
+// would immediately mark the five frozen straits fields stale, which would
+// degrade N7 to unknown and change what the assessment reads. That is arguably
+// the honest outcome, but it is a scoring decision, not a plumbing one, and it
+// is deliberately left for a separate change.
+function pickVintage(sl, section, sectionKey) {
+  const health = (sl && sl.dataHealth && sl.dataHealth[sectionKey]) || null;
+  const candidates = [
+    section && section.lastChangedAt,   // truest: only moves on real change
+    section && section.verifiedAt,
+    health && health.verifiedAt,
+    section && section.updatedAt,       // restamps on check — weakest
+    health && health.asOf,
+  ];
+  let vintage = null;
+  let field = null;
+  const names = ['lastChangedAt', 'verifiedAt', 'dataHealth.verifiedAt', 'updatedAt', 'dataHealth.asOf'];
+  for (let i = 0; i < candidates.length; i++) {
+    if (typeof candidates[i] === 'string' && candidates[i].length > 0) {
+      vintage = candidates[i];
+      field = names[i];
+      break;
+    }
+  }
+  return {
+    vintage: vintage,
+    vintage_field: field,
+    health: (health && (health.source || health.status)) || null,
+  };
+}
+
+// Attach vintage to a stored point. Additive only — value and date keep their
+// existing meaning, so nothing downstream changes shape.
+function point(value, date, source, meta, curated) {
+  const p = { value: value, date: date, source: source };
+  if (meta) {
+    if (meta.vintage) p.vintage = meta.vintage;
+    if (meta.vintage_field) p.vintage_field = meta.vintage_field;
+    if (meta.health) p.health = meta.health;
+  }
+  if (curated) p.curated = true;
+  return p;
+}
+
+function isNum(v) {
+  return typeof v === 'number' && Number.isFinite(v);
+}
+
+// One-shot structural report so we stop guessing at straits' schema.
+function logStraitsShape(sl, log) {
+  try {
+    log.push(`[STRAITS] top-level keys: ${Object.keys(sl).join(', ')}`);
+    if (sl.dataHealth) {
+      const dh = Object.keys(sl.dataHealth).map(k => {
+        const v = sl.dataHealth[k] || {};
+        return `${k}=${v.source || v.status || '?'}${v.verifiedAt ? '@' + v.verifiedAt : ''}`;
+      });
+      log.push(`[STRAITS] dataHealth: ${dh.join(' | ')}`);
+    } else {
+      log.push('[STRAITS] dataHealth: ABSENT');
+    }
+    for (const k of ['insurance', 'pipelineBypass', 'transits', 'aisGaps', 'vesselRisk']) {
+      const s = sl[k];
+      if (s && !Array.isArray(s) && typeof s === 'object') {
+        const stamps = ['verifiedAt', 'lastChangedAt', 'updatedAt', 'asOf']
+          .filter(f => s[f]).map(f => `${f}=${s[f]}`);
+        log.push(`[STRAITS] ${k} stamps: ${stamps.length ? stamps.join(' ') : 'NONE'}`);
+      }
+    }
+  } catch (err) {
+    log.push(`[STRAITS] shape probe failed: ${err.message}`);
+  }
+}
+
+
 module.exports = async (req, res) => {
   const startTime = Date.now();
   const log = [];
@@ -203,13 +299,18 @@ module.exports = async (req, res) => {
       .then(data => ({ status: 'ok', data }))
       .catch(err => ({ status: 'error', error: err.message }));
 
+    const jwcPromise = fetchJWC()
+      .then(data => ({ status: 'ok', data }))
+      .catch(err => ({ status: 'error', error: err.message }));
+
     // Wait for everything at once
-    const [eiaResults, fredResults, crackResults, portWatchResult, straitsResult] = await Promise.all([
+    const [eiaResults, fredResults, crackResults, portWatchResult, straitsResult, jwcResult] = await Promise.all([
       Promise.all(eiaPromises),
       Promise.all(fredPromises),
       Promise.all(crackPromises),
       portWatchPromise,
       straitsPromise,
+      jwcPromise,
     ]);
 
     log.push(`API calls completed in ${Date.now() - startTime}ms`);
@@ -321,68 +422,156 @@ module.exports = async (req, res) => {
       const today = sl.asOf ? sl.asOf.split('T')[0] : new Date().toISOString().split('T')[0];
 
       // N1 — Pipeline bypass utilisation
+      logStraitsShape(sl, log);
+
+      // N1 — Pipeline bypass utilisation.
+      // HAND-CURATED upstream: straits documents /api/v1/pipelines as
+      // "hand-curated; timestamp refreshed weekly". These are declared rows,
+      // not measurements. Petroline reading 0.0% cannot distinguish a shut line
+      // from a partially flowing one, and no threshold here can recover that.
       if (sl.pipelineBypass && Array.isArray(sl.pipelineBypass)) {
+        const pipeMeta = pickVintage(sl, sl.pipelineBypass, 'pipelines');
         const petroline = sl.pipelineBypass.find(p => p.id === 'petroline');
         const adcop = sl.pipelineBypass.find(p => p.id === 'adcop');
-        if (petroline) {
+
+        // Guard the FIELD, not just the object. The old `if (petroline)` check
+        // wrote {value: undefined} whenever straits dropped the percentage.
+        if (petroline && isNum(petroline.currentUtilizationPct)) {
+          const m = pickVintage(sl, petroline, 'pipelines');
           const added = await appendToHistory(redis, 'series:n1:petroline_pct', [
-            { value: petroline.currentUtilizationPct, date: today, source: 'straits.live' }
+            point(petroline.currentUtilizationPct, today, 'straits.live', m.vintage ? m : pipeMeta, true)
           ]);
-          log.push(`[STRAITS] petroline_pct: ${petroline.currentUtilizationPct}% (${added} new)`);
+          log.push(`[STRAITS] petroline_pct: ${petroline.currentUtilizationPct}% (${added} new, vintage ${(m.vintage || pipeMeta.vintage) || 'UNKNOWN'})`);
+        } else if (petroline) {
+          log.push(`[STRAITS] petroline_pct: SKIPPED — currentUtilizationPct not numeric (${JSON.stringify(petroline.currentUtilizationPct)})`);
         }
-        if (adcop) {
+
+        if (adcop && isNum(adcop.currentUtilizationPct)) {
+          const m = pickVintage(sl, adcop, 'pipelines');
           const added = await appendToHistory(redis, 'series:n1:adcop_pct', [
-            { value: adcop.currentUtilizationPct, date: today, source: 'straits.live' }
+            point(adcop.currentUtilizationPct, today, 'straits.live', m.vintage ? m : pipeMeta, true)
           ]);
-          log.push(`[STRAITS] adcop_pct: ${adcop.currentUtilizationPct}% (${added} new)`);
+          log.push(`[STRAITS] adcop_pct: ${adcop.currentUtilizationPct}% (${added} new, vintage ${(m.vintage || pipeMeta.vintage) || 'UNKNOWN'})`);
+        } else if (adcop) {
+          log.push(`[STRAITS] adcop_pct: SKIPPED — currentUtilizationPct not numeric (${JSON.stringify(adcop.currentUtilizationPct)})`);
+        }
+
+        // straits' nameplate for ADCOP is 1.5. The assessment carries 1.8,
+        // corroborated independently. Log the disagreement rather than silently
+        // inheriting theirs.
+        if (adcop && isNum(adcop.capacityBpd)) {
+          log.push(`[STRAITS] adcop nameplate upstream: ${adcop.capacityBpd} bpd (assessment carries 1.8M)`);
         }
       }
 
-      // N2 — AIS-derived signals only (PortWatch transits now come from direct API above)
-      if (sl.aisGaps) {
+      // N2 — AIS-derived signals only. These are live feeds, not curated.
+      if (sl.aisGaps && isNum(sl.aisGaps.count)) {
+        const m = pickVintage(sl, sl.aisGaps, 'ships');
         const added = await appendToHistory(redis, 'series:n2:hormuz_dark_ais', [
-          { value: sl.aisGaps.count, date: today, source: 'straits.live/AIS' }
+          point(sl.aisGaps.count, today, 'straits.live/AIS', m, false)
         ]);
-        log.push(`[STRAITS] hormuz_dark_ais: ${sl.aisGaps.count} (${added} new)`);
+        log.push(`[STRAITS] hormuz_dark_ais: ${sl.aisGaps.count} (${added} new, baseline7d ${sl.aisGaps.baseline7d !== undefined ? sl.aisGaps.baseline7d : 'n/a'})`);
+      } else if (sl.aisGaps) {
+        log.push(`[STRAITS] hormuz_dark_ais: SKIPPED — count not numeric (${JSON.stringify(sl.aisGaps.count)})`);
       }
 
-      if (sl.strandedOffshore !== undefined) {
+      if (isNum(sl.strandedOffshore)) {
+        const m = pickVintage(sl, null, 'ships');
         const added = await appendToHistory(redis, 'series:n2:stranded_offshore', [
-          { value: sl.strandedOffshore, date: today, source: 'straits.live/AIS' }
+          point(sl.strandedOffshore, today, 'straits.live/AIS', m, false)
         ]);
         log.push(`[STRAITS] stranded_offshore: ${sl.strandedOffshore} (${added} new)`);
+      } else if (sl.strandedOffshore !== undefined) {
+        log.push(`[STRAITS] stranded_offshore: SKIPPED — not numeric (${JSON.stringify(sl.strandedOffshore)}). straits suppresses this when the AIS feed is quiet.`);
       }
 
-      // N7 — Insurance & risk premium
+      // N7 — Insurance & risk premium.
+      // HAND-CURATED upstream, and straits says so: "hand-curated; timestamp
+      // refreshed weekly", sourced as a straits.live estimate from carrier
+      // advisories, Lloyd's List, TradeWinds and Reuters. This is one estimate,
+      // not a second dashboard agreeing with anything.
       if (sl.insurance) {
+        const m = pickVintage(sl, sl.insurance, 'insurance');
         const insDate = sl.insurance.updatedAt ? sl.insurance.updatedAt.split('T')[0] : today;
-        await appendToHistory(redis, 'series:n7:insurance_multiple', [
-          { value: sl.insurance.multiple, date: insDate, source: 'straits.live' }
-        ]);
-        await appendToHistory(redis, 'series:n7:vlcc_premium_high', [
-          { value: sl.insurance.vlccPremiumHigh, date: insDate, source: 'straits.live' }
-        ]);
-        const clubCount = sl.insurance.withdrawnClubs ? sl.insurance.withdrawnClubs.length : 0;
+        if (isNum(sl.insurance.multiple)) {
+          await appendToHistory(redis, 'series:n7:insurance_multiple', [
+            point(sl.insurance.multiple, insDate, 'straits.live estimate', m, true)
+          ]);
+        }
+        if (isNum(sl.insurance.vlccPremiumHigh)) {
+          await appendToHistory(redis, 'series:n7:vlcc_premium_high', [
+            point(sl.insurance.vlccPremiumHigh, insDate, 'straits.live estimate', m, true)
+          ]);
+        }
+        const clubCount = Array.isArray(sl.insurance.withdrawnClubs) ? sl.insurance.withdrawnClubs.length : 0;
         await appendToHistory(redis, 'series:n7:clubs_withdrawn', [
-          { value: clubCount, date: insDate, source: 'straits.live' }
+          point(clubCount, insDate, 'straits.live estimate', m, true)
         ]);
-        log.push(`[STRAITS] insurance: ${sl.insurance.multiple}x, premium $${sl.insurance.vlccPremiumHigh}, ${clubCount} clubs withdrawn`);
+        log.push(`[STRAITS] insurance: ${sl.insurance.multiple}x, premium $${sl.insurance.vlccPremiumHigh}, ${clubCount} clubs — vintage ${m.vintage || 'UNKNOWN'} via ${m.vintage_field || 'none'}`);
+        if (Array.isArray(sl.insurance.withdrawnClubs)) {
+          log.push(`[STRAITS] clubs named: ${sl.insurance.withdrawnClubs.join(', ')}`);
+        }
       }
 
-      // N8 — Sanctions / vessel risk
-      if (sl.vesselRisk) {
+      // N7 — JWC listed areas. lastChangedAt is the honest vintage; updatedAt
+      // restamps on every 6-hourly check.
+      if (jwcResult.status === 'error') {
+        log.push(`[JWC] ERROR — ${jwcResult.error}`);
+      } else {
+        const j = jwcResult.data || {};
+        const body = j.jwc || j;
+        const changed = body.lastChangedAt || null;
+        const areasVal = Array.isArray(body.areas)
+          ? body.areas.join('; ')
+          : (typeof body.areas === 'string' ? body.areas : (body.summary || null));
+        if (areasVal) {
+          const jDate = changed ? String(changed).split('T')[0] : today;
+          const added = await appendToHistory(redis, 'series:n7:jwc_areas', [
+            point(areasVal, jDate, "Lloyd's JWC circular via straits.live",
+                  { vintage: changed, vintage_field: changed ? 'lastChangedAt' : null, health: null }, false)
+          ]);
+          log.push(`[JWC] jwc_areas: dated ${jDate} (${added} new)${body.mentionsArabianGulf !== undefined ? ', mentionsArabianGulf=' + body.mentionsArabianGulf : ''}`);
+        } else {
+          log.push(`[JWC] no usable areas field — keys: ${Object.keys(body).join(', ')}`);
+        }
+      }
+
+      // N8 — Sanctions / vessel risk.
+      if (sl.vesselRisk && isNum(sl.vesselRisk.high)) {
+        const m = pickVintage(sl, sl.vesselRisk, 'vessels');
         const added = await appendToHistory(redis, 'series:n8:vessels_high_risk', [
-          { value: sl.vesselRisk.high, date: today, source: 'straits.live/AIS+OFAC' }
+          point(sl.vesselRisk.high, today, 'straits.live/AIS+OFAC', m, false)
         ]);
         log.push(`[STRAITS] vessels_high_risk: ${sl.vesselRisk.high} (${added} new)`);
       }
 
+      // Carriers: HAND-CURATED, and we were reading the wrong field. straits
+      // documents hormuzPosture as the operative one — five carriers at
+      // "stopped" is what drives their own closed verdict — while `status`
+      // carries Red Sea posture that says nothing about Hormuz. Count both and
+      // log the difference until the two are reconciled; keep writing `status`
+      // so the stored series does not silently change basis mid-flight.
       if (sl.carrierSuspensions && Array.isArray(sl.carrierSuspensions)) {
-        const rerouting = sl.carrierSuspensions.filter(c => c.status === 'rerouting' || c.status === 'suspended').length;
+        const cm = pickVintage(sl, null, 'carriers');
+        const byStatus = sl.carrierSuspensions.filter(c => c.status === 'rerouting' || c.status === 'suspended').length;
+        const byPosture = sl.carrierSuspensions.filter(c => c.hormuzPosture === 'stopped').length;
+        const authored = sl.carrierSuspensions
+          .map(c => c.authoredAt)
+          .filter(a => typeof a === 'string' && a.length > 0)
+          .sort();
+        const newestAuthored = authored.length ? authored[authored.length - 1] : null;
+
+        const meta = {
+          vintage: newestAuthored || cm.vintage,
+          vintage_field: newestAuthored ? 'newest authoredAt' : cm.vintage_field,
+          health: cm.health,
+        };
         const added = await appendToHistory(redis, 'series:n8:carriers_rerouting', [
-          { value: rerouting, date: today, source: 'straits.live' }
+          point(byStatus, today, 'straits.live (curated)', meta, true)
         ]);
-        log.push(`[STRAITS] carriers_rerouting: ${rerouting} of ${sl.carrierSuspensions.length} (${added} new)`);
+        log.push(`[STRAITS] carriers_rerouting: ${byStatus} of ${sl.carrierSuspensions.length} by status (${added} new)`);
+        log.push(`[STRAITS] carriers by hormuzPosture=stopped: ${byPosture} — straits' own closed-verdict basis. Differs from stored value: ${byPosture !== byStatus}`);
+        log.push(`[STRAITS] carriers newest authoredAt: ${newestAuthored || 'ABSENT'}`);
       }
     }
 
@@ -391,10 +580,15 @@ module.exports = async (req, res) => {
     await redis.set('meta:last_cron', now);
     log.push(`Completed in ${Date.now() - startTime}ms`);
 
+    // The cron invoker discards the response body, so the log only existed in
+    // a place nobody could read. Every run now lands in the Vercel runtime log.
+    console.log('[CRON]\n' + log.join('\n'));
+
     return res.status(200).json({ ok: true, timestamp: now, log });
   } catch (err) {
     console.error('Cron error:', err);
     log.push(`FATAL: ${err.message}`);
+    console.log('[CRON]\n' + log.join('\n'));
     return res.status(500).json({ error: err.message, log });
   }
 };
