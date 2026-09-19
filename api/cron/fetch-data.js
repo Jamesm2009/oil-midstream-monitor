@@ -135,43 +135,20 @@ async function fetchPortWatch() {
   return { byChokepoint, found, missing, totalFeatures: data.features.length };
 }
 
-// Dedupe is by date, which is right for values — a later run must never
-// silently rewrite an observation already filed under a date. But it also
-// meant metadata IMPROVEMENTS were discarded: a point rebuilt with curated,
-// vintage or health information was dropped whole because a point for that
-// date already existed. That bit hardest on the frozen straits fields, whose
-// dates by definition do not move, so the series most needing an "estimate"
-// marker were the last that could ever receive one.
-//
-// Values remain immutable. Only missing metadata keys are filled in.
-const UPGRADEABLE_META = ['curated', 'vintage', 'vintage_field', 'health', 'source'];
-
 async function appendToHistory(redis, redisKey, newPoints) {
   let history = (await redis.get(redisKey)) || [];
   if (!Array.isArray(history)) history = [];
 
   let added = 0;
-  let upgraded = 0;
-
   for (const point of newPoints) {
-    const existing = history.find(h => h.date === point.date);
-
-    if (!existing) {
+    const exists = history.some(h => h.date === point.date);
+    if (!exists) {
       history.push(point);
       added++;
-      continue;
-    }
-
-    // Same date: keep the stored value, adopt any metadata it lacks.
-    for (const key of UPGRADEABLE_META) {
-      if (point[key] !== undefined && existing[key] === undefined) {
-        existing[key] = point[key];
-        upgraded++;
-      }
     }
   }
 
-  if (added > 0 || upgraded > 0) {
+  if (added > 0) {
     history.sort((a, b) => a.date.localeCompare(b.date));
     await redis.set(redisKey, history);
   }
@@ -185,16 +162,11 @@ async function fetchStraits() {
   return straitsRes.json();
 }
 
-// /api/v1/jwc — Lloyd's Joint War Committee listed areas. Re-checked every
-// 6 hours upstream. Per straits' own docs: updatedAt restamps on every check,
-// lastChangedAt moves only when the circular itself changes. That is exactly
-// the distinction the Monitor needs everywhere, and this endpoint is the only
-// one that hands it over directly.
-async function fetchJWC() {
-  const r = await fetch('https://straits.live/api/v1/jwc');
-  if (!r.ok) throw new Error(`straits jwc ${r.status}`);
-  return r.json();
-}
+// NOTE: fetchJWC removed 19 Sep 2026. The jwc_areas series did not feed
+// scoring and the listed-area set has not moved since 3 Mar 2026, so the
+// nightly call fetched data nothing read. The listing history is preserved as
+// context in n7.manualSources in lib/config.js. straits' lastChangedAt vs
+// updatedAt distinction is still the model the rest of the Monitor follows.
 
 // ── D45: TD3C update detector ───────────────────────────────────────────────
 //
@@ -396,22 +368,17 @@ module.exports = async (req, res) => {
       .then(data => ({ status: 'ok', data }))
       .catch(err => ({ status: 'error', error: err.message }));
 
-    const jwcPromise = fetchJWC()
-      .then(data => ({ status: 'ok', data }))
-      .catch(err => ({ status: 'error', error: err.message }));
-
     const seatradePromise = fetchSeatradeTD3C()
       .then(data => ({ status: 'ok', data }))
       .catch(err => ({ status: 'error', error: err.message }));
 
     // Wait for everything at once
-    const [eiaResults, fredResults, crackResults, portWatchResult, straitsResult, jwcResult, seatradeResult] = await Promise.all([
+    const [eiaResults, fredResults, crackResults, portWatchResult, straitsResult, seatradeResult] = await Promise.all([
       Promise.all(eiaPromises),
       Promise.all(fredPromises),
       Promise.all(crackPromises),
       portWatchPromise,
       straitsPromise,
-      jwcPromise,
       seatradePromise,
     ]);
 
@@ -630,29 +597,6 @@ module.exports = async (req, res) => {
         }
         if (Array.isArray(sl.insurance.withdrawnClubs)) {
           log.push(`[STRAITS] clubs named: ${sl.insurance.withdrawnClubs.join(', ')}`);
-        }
-      }
-
-      // N7 — JWC listed areas. lastChangedAt is the honest vintage; updatedAt
-      // restamps on every 6-hourly check.
-      if (jwcResult.status === 'error') {
-        log.push(`[JWC] ERROR — ${jwcResult.error}`);
-      } else {
-        const j = jwcResult.data || {};
-        const body = j.jwc || j;
-        const changed = body.lastChangedAt || null;
-        const areasVal = Array.isArray(body.areas)
-          ? body.areas.join('; ')
-          : (typeof body.areas === 'string' ? body.areas : (body.summary || null));
-        if (areasVal) {
-          const jDate = changed ? String(changed).split('T')[0] : today;
-          const added = await appendToHistory(redis, 'series:n7:jwc_areas', [
-            point(areasVal, jDate, "Lloyd's JWC circular via straits.live",
-                  { vintage: changed, vintage_field: changed ? 'lastChangedAt' : null, health: null }, false)
-          ]);
-          log.push(`[JWC] jwc_areas: dated ${jDate} (${added} new)${body.mentionsArabianGulf !== undefined ? ', mentionsArabianGulf=' + body.mentionsArabianGulf : ''}`);
-        } else {
-          log.push(`[JWC] no usable areas field — keys: ${Object.keys(body).join(', ')}`);
         }
       }
 
