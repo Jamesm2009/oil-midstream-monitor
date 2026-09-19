@@ -52,9 +52,20 @@ module.exports = async (req, res) => {
 
         const latest = history.length > 0 ? history[history.length - 1] : null;
 
-        let stale = false;
+                let stale = false;
+        let ageDays = null;
         if (latest && latest.date) {
-          const ageDays = (Date.now() - new Date(latest.date).getTime()) / 86400000;
+          ageDays = (Date.now() - new Date(latest.date).getTime()) / 86400000;
+        }
+
+        if (s.cadence === 'as_changed') {
+          // D48. Event-driven fields: unchanged IS the information. A JWC
+          // circular unrevised for 61 days is not stale, it is unrevised — and
+          // under honest vintage dating (D46) these are dated by lastChangedAt,
+          // so an age threshold would start flagging correct data as rotten.
+          // Absence is still not freshness: no observation at all stays stale.
+          stale = !latest || !latest.date;
+        } else if (ageDays !== null) {
           const threshold = STALE_THRESHOLDS[s.cadence] || 30;
           stale = ageDays > threshold;
         } else {
