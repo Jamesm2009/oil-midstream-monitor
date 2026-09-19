@@ -373,7 +373,7 @@ module.exports = async (req, res) => {
       .then(data => ({ status: 'ok', data }))
       .catch(err => ({ status: 'error', error: err.message }));
 
-        const jwcPromise = fetchJWC()
+    const jwcPromise = fetchJWC()
       .then(data => ({ status: 'ok', data }))
       .catch(err => ({ status: 'error', error: err.message }));
 
@@ -390,7 +390,6 @@ module.exports = async (req, res) => {
       straitsPromise,
       jwcPromise,
       seatradePromise,
-    ]);omise,
     ]);
 
     log.push(`API calls completed in ${Date.now() - startTime}ms`);
@@ -679,7 +678,7 @@ module.exports = async (req, res) => {
       }
     }
 
-        // ── D45: TD3C watch — detection only, the value stays manual ──
+    // ── D45: TD3C watch — detection only, the value stays manual ──
     if (seatradeResult.status === 'error') {
       log.push(`[SEATRADE] ERROR — ${seatradeResult.error}`);
     } else if (!seatradeResult.data) {
@@ -699,9 +698,6 @@ module.exports = async (req, res) => {
       log.push(`[SEATRADE] td3c_watch: ${isNew ? 'NEW' : 'unchanged'} — ${w.date || 'undated'} — ${w.title}`);
     }
 
-    // Update timestamp
-    const now = new Date().toISOString();
-    await redis.set('meta:last_cron', now);
     // Update timestamp
     const now = new Date().toISOString();
     await redis.set('meta:last_cron', now);
