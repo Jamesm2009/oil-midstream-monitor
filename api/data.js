@@ -72,7 +72,7 @@ module.exports = async (req, res) => {
           stale = true; // no dated observation is not fresh
         }
 
-        nodeData.series.push({
+                nodeData.series.push({
           key: s.key,
           label: s.label,
           unit: s.unit,
@@ -80,6 +80,14 @@ module.exports = async (req, res) => {
           cadence: s.cadence,
           latest,
           stale,
+          // D46. When a node degrades to unknown the value does not vanish —
+          // the UI should read "last estimate 40x, as of 15 September" rather
+          // than blanking. These are lifted out of `latest` so the front end
+          // does not have to know the point shape.
+          vintage: latest && latest.vintage ? latest.vintage : null,
+          vintageField: latest && latest.vintage_field ? latest.vintage_field : null,
+          curated: Boolean(latest && latest.curated),
+          ageDays: ageDays === null ? null : Math.round(ageDays),
           readError,
           historyLength: history.length,
         });
@@ -136,6 +144,13 @@ module.exports = async (req, res) => {
     try {
       result.meta.lastCron = await redis.get('meta:last_cron');
     } catch { result.meta.lastCron = null; }
+
+    // D45. Detection only. The cron records that a TD3C article exists; the
+    // number itself stays a manual entry, because it appears as varying prose
+    // and the source is Informa copyright.
+    try {
+      result.meta.td3cWatch = await redis.get('meta:td3c_watch');
+    } catch { result.meta.td3cWatch = null; }
 
     res.setHeader('Cache-Control', 'no-store');
     return res.status(200).json(result);
