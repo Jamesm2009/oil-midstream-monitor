@@ -173,6 +173,56 @@ async function fetchJWC() {
   return r.json();
 }
 
+// ── D45: TD3C update detector ───────────────────────────────────────────────
+//
+// Detection, never the value. Seatrade Maritime publishes the Baltic Exchange
+// TD3C assessment in free articles, but the figure appears as varying prose
+// ("$1.099m per day", "close to $1.1m", "WS1350"), the articles are ad-hoc
+// rather than at a stable URL, and the content is Informa copyright. So this
+// records headline, link and publication date only, so the dashboard can say
+// "update available" against a field that stays manually entered.
+//
+// FEED URL IS UNCONFIRMED. Set SEATRADE_FEED to the real feed path before
+// relying on it; a 404 is caught and logged, so a wrong value degrades to a
+// silent no-op rather than breaking the run.
+const SEATRADE_FEED = 'https://www.seatrade-maritime.com/rss.xml';
+const TD3C_PATTERN = /\b(td3c|vlcc rate|vlcc spot|vlcc earnings|tanker rate|charter rate|freight rate)/i;
+
+async function fetchSeatradeTD3C() {
+  const r = await fetch(SEATRADE_FEED, {
+    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; OilMonitor/1.0)' },
+  });
+  if (!r.ok) throw new Error(`seatrade feed ${r.status}`);
+  const xml = await r.text();
+
+  const strip = (s) => s.replace(/<!\[CDATA\[|\]\]>/g, '').trim();
+  const items = [];
+  const itemRe = /<item[\s\S]*?<\/item>/gi;
+  let m;
+
+  while ((m = itemRe.exec(xml)) !== null) {
+    const block = m[0];
+    const pick = (tag) => {
+      const t = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`, 'i').exec(block);
+      return t ? strip(t[1]) : null;
+    };
+    const title = pick('title');
+    if (!title || !TD3C_PATTERN.test(title)) continue;
+
+    const pub = pick('pubDate');
+    let date = null;
+    if (pub) {
+      const d = new Date(pub);
+      if (!Number.isNaN(d.getTime())) date = d.toISOString().split('T')[0];
+    }
+    items.push({ title, link: pick('link'), date });
+  }
+
+  // Newest last. Undated items sort first so a dated hit always wins.
+  items.sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+  return items.length ? items[items.length - 1] : null;
+}
+
 // ── Upstream vintage ────────────────────────────────────────────────────────
 //
 // straits publishes a per-section freshness signal, but the exact shape is not
@@ -182,12 +232,15 @@ async function fetchJWC() {
 // answered. logStraitsShape() below prints what was actually found so this can
 // be tightened to the real field next cycle.
 //
-// NOTE ON DATES. This records vintage ALONGSIDE the value; it does not change
-// the date a point is filed under. Dating a curated field by its true vintage
-// would immediately mark the five frozen straits fields stale, which would
-// degrade N7 to unknown and change what the assessment reads. That is arguably
-// the honest outcome, but it is a scoring decision, not a plumbing one, and it
-// is deliberately left for a separate change.
+// NOTE ON DATES. pickVintage only attaches vintage metadata; resolveDate below
+// is what actually files a curated point under its true vintage rather than
+// today. That decision has now been taken (D46, 18 Sep 2026): curated fields
+// are dated honestly and N7 is allowed to degrade to unknown as they age out.
+// The value is NOT suppressed when that happens — api/data.js surfaces the
+// last observation with its vintage, so the node reads "last estimate 40x, as
+// of 15 September" rather than going blank. An unknown node showing its last
+// dated estimate is more useful and more honest than either a false current
+// reading or an empty box.
 function pickVintage(sl, section, sectionKey) {
   const health = (sl && sl.dataHealth && sl.dataHealth[sectionKey]) || null;
   const candidates = [
@@ -320,18 +373,24 @@ module.exports = async (req, res) => {
       .then(data => ({ status: 'ok', data }))
       .catch(err => ({ status: 'error', error: err.message }));
 
-    const jwcPromise = fetchJWC()
+        const jwcPromise = fetchJWC()
+      .then(data => ({ status: 'ok', data }))
+      .catch(err => ({ status: 'error', error: err.message }));
+
+    const seatradePromise = fetchSeatradeTD3C()
       .then(data => ({ status: 'ok', data }))
       .catch(err => ({ status: 'error', error: err.message }));
 
     // Wait for everything at once
-    const [eiaResults, fredResults, crackResults, portWatchResult, straitsResult, jwcResult] = await Promise.all([
+    const [eiaResults, fredResults, crackResults, portWatchResult, straitsResult, jwcResult, seatradeResult] = await Promise.all([
       Promise.all(eiaPromises),
       Promise.all(fredPromises),
       Promise.all(crackPromises),
       portWatchPromise,
       straitsPromise,
       jwcPromise,
+      seatradePromise,
+    ]);omise,
     ]);
 
     log.push(`API calls completed in ${Date.now() - startTime}ms`);
@@ -620,6 +679,29 @@ module.exports = async (req, res) => {
       }
     }
 
+        // ── D45: TD3C watch — detection only, the value stays manual ──
+    if (seatradeResult.status === 'error') {
+      log.push(`[SEATRADE] ERROR — ${seatradeResult.error}`);
+    } else if (!seatradeResult.data) {
+      log.push('[SEATRADE] no TD3C-matching headline in current feed');
+    } else {
+      const w = seatradeResult.data;
+      let prev = null;
+      try { prev = await redis.get('meta:td3c_watch'); } catch { /* first run */ }
+      const isNew = !prev || prev.link !== w.link;
+      await redis.set('meta:td3c_watch', {
+        title: w.title,
+        link: w.link,
+        date: w.date,
+        seenAt: new Date().toISOString(),
+        firstSeenAt: isNew ? new Date().toISOString() : (prev && prev.firstSeenAt) || null,
+      });
+      log.push(`[SEATRADE] td3c_watch: ${isNew ? 'NEW' : 'unchanged'} — ${w.date || 'undated'} — ${w.title}`);
+    }
+
+    // Update timestamp
+    const now = new Date().toISOString();
+    await redis.set('meta:last_cron', now);
     // Update timestamp
     const now = new Date().toISOString();
     await redis.set('meta:last_cron', now);
