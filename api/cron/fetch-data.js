@@ -135,20 +135,43 @@ async function fetchPortWatch() {
   return { byChokepoint, found, missing, totalFeatures: data.features.length };
 }
 
+// Dedupe is by date, which is right for values — a later run must never
+// silently rewrite an observation already filed under a date. But it also
+// meant metadata IMPROVEMENTS were discarded: a point rebuilt with curated,
+// vintage or health information was dropped whole because a point for that
+// date already existed. That bit hardest on the frozen straits fields, whose
+// dates by definition do not move, so the series most needing an "estimate"
+// marker were the last that could ever receive one.
+//
+// Values remain immutable. Only missing metadata keys are filled in.
+const UPGRADEABLE_META = ['curated', 'vintage', 'vintage_field', 'health', 'source'];
+
 async function appendToHistory(redis, redisKey, newPoints) {
   let history = (await redis.get(redisKey)) || [];
   if (!Array.isArray(history)) history = [];
 
   let added = 0;
+  let upgraded = 0;
+
   for (const point of newPoints) {
-    const exists = history.some(h => h.date === point.date);
-    if (!exists) {
+    const existing = history.find(h => h.date === point.date);
+
+    if (!existing) {
       history.push(point);
       added++;
+      continue;
+    }
+
+    // Same date: keep the stored value, adopt any metadata it lacks.
+    for (const key of UPGRADEABLE_META) {
+      if (point[key] !== undefined && existing[key] === undefined) {
+        existing[key] = point[key];
+        upgraded++;
+      }
     }
   }
 
-  if (added > 0) {
+  if (added > 0 || upgraded > 0) {
     history.sort((a, b) => a.date.localeCompare(b.date));
     await redis.set(redisKey, history);
   }
