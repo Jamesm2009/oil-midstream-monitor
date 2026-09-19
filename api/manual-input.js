@@ -10,7 +10,7 @@ module.exports = async (req, res) => {
   if (!requireAuth(req, res)) return;
 
   try {
-    const { node, series, value, date, source } = req.body || {};
+    const { node, series, value, date, source, force } = req.body || {};
 
     if (!node || !series || value === undefined || !date) {
       return res.status(400).json({ error: 'Missing required fields: node, series, value, date' });
@@ -24,6 +24,18 @@ module.exports = async (req, res) => {
     const seriesDef = nodeDef.series.find(s => s.key === series);
     if (!seriesDef) {
       return res.status(400).json({ error: `Unknown series: ${series} in node ${node}` });
+    }
+
+    // Guard: the form lists automated series too (marked [auto]), so one
+    // mis-selection could write a typed number over an EIA or FRED value with
+    // nothing to show it had happened. Refuse unless explicitly forced.
+    if (seriesDef.manual !== true && force !== true) {
+      return res.status(409).json({
+        error: `${series} is an automated series (${seriesDef.label}). A manual entry will be overwritten by the next cron run and will not be distinguishable from fetched data. Resend with force: true to override.`,
+        code: 'AUTOMATED_SERIES',
+        series: series,
+        label: seriesDef.label,
+      });
     }
 
     const redis = getRedis();
@@ -53,16 +65,29 @@ module.exports = async (req, res) => {
       }
     }
 
-    // Create new data point
+    // Create new data point. `manual: true` is structural, not cosmetic: a
+    // stored point previously carried only a source string, so a typed value
+    // and a fetched one were indistinguishable once filed.
     const point = {
       value: parsedValue,
       date: date,
       source: source || 'manual',
+      manual: true,
     };
+    if (force === true && seriesDef.manual !== true) point.forced = true;
 
-    // Check for duplicate date — replace if exists
+    // Duplicate date: replace the VALUE, preserve the metadata. Assigning the
+    // new point wholesale destroyed curated / vintage / health flags written by
+    // the cron — the same defect fixed in appendToHistory, in the other
+    // direction. Losing `curated` would silently turn an upstream estimate back
+    // into something that reads as a measurement.
+    const PRESERVED_META = ['curated', 'vintage', 'vintage_field', 'health'];
     const existingIdx = history.findIndex(h => h.date === date);
     if (existingIdx >= 0) {
+      const prior = history[existingIdx];
+      for (const key of PRESERVED_META) {
+        if (prior[key] !== undefined && point[key] === undefined) point[key] = prior[key];
+      }
       history[existingIdx] = point;
     } else {
       history.push(point);
